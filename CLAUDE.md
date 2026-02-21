@@ -27,6 +27,7 @@ Copy `.env.example` to `.env.local`. Required variables:
 - `ENCRYPTION_KEY` — base64-encoded 256-bit key (`openssl rand -base64 32`)
 - `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` — for custom domain verification
 - `NEXT_PUBLIC_APP_DOMAIN` — e.g. `linear.gratis`
+- `DISABLE_SIGNUPS` — set to `"true"` to prevent new user registrations (existing users can still sign in)
 
 ## Architecture
 

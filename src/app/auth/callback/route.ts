@@ -8,18 +8,28 @@ export async function GET(request: Request) {
 
   if (code) {
     const supabase = await createClient()
-    const { error } = await supabase.auth.exchangeCodeForSession(code)
+    const { data, error } = await supabase.auth.exchangeCodeForSession(code)
 
-    if (!error) {
+    if (!error && data.user) {
+      // If signups are disabled, reject users who just created their account
+      if (process.env.DISABLE_SIGNUPS === 'true') {
+        const createdAt = new Date(data.user.created_at).getTime()
+        const isNewUser = Date.now() - createdAt < 10_000
+
+        if (isNewUser) {
+          // Sign out the newly created user and redirect with an error
+          await supabase.auth.signOut()
+          return NextResponse.redirect(`${origin}/login?error=signups_disabled`)
+        }
+      }
+
       // Successful auth - redirect to the intended destination
       const forwardedHost = request.headers.get('x-forwarded-host')
       const isLocalEnv = process.env.NODE_ENV === 'development'
 
       if (isLocalEnv) {
-        // In development, redirect to origin
         return NextResponse.redirect(`${origin}${next}`)
       } else if (forwardedHost) {
-        // In production behind a proxy, use the forwarded host
         return NextResponse.redirect(`https://${forwardedHost}${next}`)
       } else {
         return NextResponse.redirect(`${origin}${next}`)
