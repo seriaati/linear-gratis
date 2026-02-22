@@ -70,6 +70,8 @@ export default function PublicViewsPage() {
   const [editingView, setEditingView] = useState<PublicView | null>(null);
   const [showEditView, setShowEditView] = useState(false);
   const [allowIssueCreation, setAllowIssueCreation] = useState(false);
+  const [availableStatuses, setAvailableStatuses] = useState<{ id: string; name: string; color: string; type: string }[]>([]);
+  const [hiddenStatuses, setHiddenStatuses] = useState<string[]>([]);
 
   const loadUserData = useCallback(async () => {
     if (!user) return;
@@ -163,6 +165,31 @@ export default function PublicViewsPage() {
     }
   };
 
+  const fetchStatuses = async (token: string, projectId?: string, teamId?: string) => {
+    if (!projectId && !teamId) {
+      setAvailableStatuses([]);
+      return;
+    }
+    try {
+      const response = await fetch("/api/linear/metadata", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiToken: token,
+          ...(projectId ? { projectId } : { teamId }),
+        }),
+      });
+      if (response.ok) {
+        const data = (await response.json()) as {
+          metadata?: { states?: { id: string; name: string; color: string; type: string }[] };
+        };
+        setAvailableStatuses(data.metadata?.states ?? []);
+      }
+    } catch (error) {
+      console.error("Failed to fetch statuses:", error);
+    }
+  };
+
   const generateSlug = (name: string) => {
     return name
       .toLowerCase()
@@ -238,6 +265,7 @@ export default function PublicViewsPage() {
         show_priorities: true,
         show_descriptions: true,
         allowed_statuses: [],
+        hidden_statuses: hiddenStatuses,
         password_protected: passwordProtected,
         password_hash: passwordHash,
         is_active: true,
@@ -312,6 +340,16 @@ export default function PublicViewsPage() {
     setTimeout(() => setMessage(null), 3000);
   };
 
+  const handleSelectProject = (value: string) => {
+    setSelectedProject(value);
+    if (linearToken) fetchStatuses(linearToken, value, undefined);
+  };
+
+  const handleSelectTeam = (value: string) => {
+    setSelectedTeam(value);
+    if (linearToken) fetchStatuses(linearToken, undefined, value);
+  };
+
   const resetForm = () => {
     setViewName("");
     setViewSlug("");
@@ -323,6 +361,8 @@ export default function PublicViewsPage() {
     setPasswordProtected(false);
     setPassword("");
     setAllowIssueCreation(false);
+    setHiddenStatuses([]);
+    setAvailableStatuses([]);
     setShowCreateView(false);
     setEditingView(null);
     setShowEditView(false);
@@ -337,21 +377,25 @@ export default function PublicViewsPage() {
     setPasswordProtected(view.password_protected || false);
     setPassword("");
     setAllowIssueCreation(view.allow_issue_creation || false);
+    setHiddenStatuses(view.hidden_statuses ?? []);
 
     // Set source type and selection based on existing view
     if (view.project_id) {
       setSourceType("project");
       setSelectedProject(view.project_id);
       setSelectedTeam("");
+      if (linearToken) fetchStatuses(linearToken, view.project_id, undefined);
     } else if (view.team_id) {
       setSourceType("team");
       setSelectedTeam(view.team_id);
       setSelectedProject("");
+      if (linearToken) fetchStatuses(linearToken, undefined, view.team_id);
     } else {
       // No project or team set - default to project
       setSourceType("project");
       setSelectedProject("");
       setSelectedTeam("");
+      setAvailableStatuses([]);
     }
 
     setShowEditView(true);
@@ -418,6 +462,7 @@ export default function PublicViewsPage() {
           password_protected: passwordProtected,
           password_hash: passwordHash,
           allow_issue_creation: allowIssueCreation,
+          hidden_statuses: hiddenStatuses,
           ...sourceData,
         })
         .eq("id", editingView.id);
@@ -654,7 +699,7 @@ export default function PublicViewsPage() {
                       <Label htmlFor="project">Linear project *</Label>
                       <Select
                         value={selectedProject}
-                        onValueChange={setSelectedProject}
+                        onValueChange={handleSelectProject}
                       >
                         <SelectTrigger>
                           <SelectValue placeholder="Choose which project to share" />
@@ -673,7 +718,7 @@ export default function PublicViewsPage() {
                       <Label htmlFor="team">Linear team *</Label>
                       <Select
                         value={selectedTeam}
-                        onValueChange={setSelectedTeam}
+                        onValueChange={handleSelectTeam}
                       >
                         <SelectTrigger>
                           <SelectValue placeholder="Choose which team to share" />
@@ -686,6 +731,45 @@ export default function PublicViewsPage() {
                           ))}
                         </SelectContent>
                       </Select>
+                    </div>
+                  )}
+
+                  {/* Hidden statuses */}
+                  {availableStatuses.length > 0 && (
+                    <div className="space-y-2">
+                      <Label>Hide statuses from public view</Label>
+                      <p className="text-xs text-muted-foreground">
+                        Issues with these statuses will not appear in the public view
+                      </p>
+                      <div className="flex flex-wrap gap-2 pt-1">
+                        {availableStatuses.map((status) => {
+                          const isHidden = hiddenStatuses.includes(status.name);
+                          return (
+                            <button
+                              key={status.id}
+                              type="button"
+                              onClick={() =>
+                                setHiddenStatuses((prev) =>
+                                  isHidden
+                                    ? prev.filter((s) => s !== status.name)
+                                    : [...prev, status.name]
+                                )
+                              }
+                              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                                isHidden
+                                  ? "border-destructive/50 bg-destructive/10 text-destructive line-through"
+                                  : "border-border bg-background text-foreground hover:bg-accent"
+                              }`}
+                            >
+                              <span
+                                className="w-2 h-2 rounded-full flex-shrink-0"
+                                style={{ backgroundColor: status.color }}
+                              />
+                              {status.name}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -912,7 +996,7 @@ export default function PublicViewsPage() {
                       <Label htmlFor="edit-project">Linear project *</Label>
                       <Select
                         value={selectedProject}
-                        onValueChange={setSelectedProject}
+                        onValueChange={handleSelectProject}
                       >
                         <SelectTrigger>
                           <SelectValue placeholder="Choose which project to share" />
@@ -931,7 +1015,7 @@ export default function PublicViewsPage() {
                       <Label htmlFor="edit-team">Linear team *</Label>
                       <Select
                         value={selectedTeam}
-                        onValueChange={setSelectedTeam}
+                        onValueChange={handleSelectTeam}
                       >
                         <SelectTrigger>
                           <SelectValue placeholder="Choose which team to share" />
@@ -944,6 +1028,45 @@ export default function PublicViewsPage() {
                           ))}
                         </SelectContent>
                       </Select>
+                    </div>
+                  )}
+
+                  {/* Hidden statuses */}
+                  {availableStatuses.length > 0 && (
+                    <div className="space-y-2">
+                      <Label>Hide statuses from public view</Label>
+                      <p className="text-xs text-muted-foreground">
+                        Issues with these statuses will not appear in the public view
+                      </p>
+                      <div className="flex flex-wrap gap-2 pt-1">
+                        {availableStatuses.map((status) => {
+                          const isHidden = hiddenStatuses.includes(status.name);
+                          return (
+                            <button
+                              key={status.id}
+                              type="button"
+                              onClick={() =>
+                                setHiddenStatuses((prev) =>
+                                  isHidden
+                                    ? prev.filter((s) => s !== status.name)
+                                    : [...prev, status.name]
+                                )
+                              }
+                              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                                isHidden
+                                  ? "border-destructive/50 bg-destructive/10 text-destructive line-through"
+                                  : "border-border bg-background text-foreground hover:bg-accent"
+                              }`}
+                            >
+                              <span
+                                className="w-2 h-2 rounded-full flex-shrink-0"
+                                style={{ backgroundColor: status.color }}
+                              />
+                              {status.name}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                   )}
                 </div>

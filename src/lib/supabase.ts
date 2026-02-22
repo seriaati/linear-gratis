@@ -61,6 +61,7 @@ export type PublicView = {
   show_priorities: boolean
   show_descriptions: boolean
   allowed_statuses: string[]
+  hidden_statuses: string[]
   password_protected: boolean
   password_hash?: string
   expires_at?: string

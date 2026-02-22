@@ -76,6 +76,12 @@ export async function GET(
       throw new Error(`Failed to fetch issues from Linear: ${issuesResult.error}`);
     }
 
+    // Filter out issues whose status is in the hidden_statuses list
+    const hiddenStatuses: string[] = viewData.hidden_statuses ?? [];
+    const visibleIssues = hiddenStatuses.length > 0
+      ? issuesResult.issues.filter((issue) => !hiddenStatuses.includes(issue.state.name))
+      : issuesResult.issues;
+
     return NextResponse.json({
       success: true,
       view: {
@@ -96,7 +102,7 @@ export async function GET(
         allow_issue_creation: viewData.allow_issue_creation,
         created_at: viewData.created_at
       },
-      issues: issuesResult.issues
+      issues: visibleIssues
     });
 
   } catch (error) {
@@ -196,6 +202,12 @@ export async function POST(
       throw new Error(`Failed to fetch issues from Linear: ${issuesResult.error}`);
     }
 
+    // Filter out issues whose status is in the hidden_statuses list
+    const hiddenStatuses: string[] = viewData.hidden_statuses ?? [];
+    const visibleIssues = hiddenStatuses.length > 0
+      ? issuesResult.issues.filter((issue) => !hiddenStatuses.includes(issue.state.name))
+      : issuesResult.issues;
+
     return NextResponse.json({
       success: true,
       view: {
@@ -217,7 +229,7 @@ export async function POST(
         allow_issue_creation: viewData.allow_issue_creation,
         created_at: viewData.created_at
       },
-      issues: issuesResult.issues
+      issues: visibleIssues
     });
 
   } catch (error) {
