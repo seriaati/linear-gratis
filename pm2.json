@@ -1,0 +1,14 @@
+{
+    "apps": [
+        {
+            "name": "linear-gratis",
+            "script": "npm",
+            "args": "start",
+            "watch": false,
+            "env": {
+                "NODE_ENV": "production",
+                "PORT": "3008"
+            }
+        }
+    ]
+}
