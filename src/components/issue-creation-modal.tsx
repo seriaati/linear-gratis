@@ -9,6 +9,7 @@ interface IssueFormQuestion {
   id: string
   type: 'short' | 'long' | 'dropdown'
   label: string
+  placeholder?: string
   required: boolean
   options: string[]
   order: number
@@ -460,7 +461,7 @@ export function IssueCreationModal({
                             color: 'lch(91.223 1.933 272)',
                             fontFamily: 'var(--font-regular)',
                           }}
-                          placeholder="Your answer"
+                          placeholder={q.placeholder || 'Your answer'}
                         />
                       )}
                       {q.type === 'long' && (
@@ -476,7 +477,7 @@ export function IssueCreationModal({
                             color: 'lch(91.223 1.933 272)',
                             fontFamily: 'var(--font-regular)',
                           }}
-                          placeholder="Your answer"
+                          placeholder={q.placeholder || 'Your answer'}
                         />
                       )}
                       {q.type === 'dropdown' && (

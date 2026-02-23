@@ -172,6 +172,19 @@ export function IssueFormQuestionBuilder({ questions, onChange }: QuestionBuilde
             </Label>
           </div>
 
+          {/* Placeholder input for short/long text */}
+          {(q.type === 'short' || q.type === 'long') && (
+            <div className="ml-6 space-y-1">
+              <Label className="text-xs text-muted-foreground">Placeholder</Label>
+              <Input
+                placeholder="e.g., Describe the steps to reproduce..."
+                value={q.placeholder || ''}
+                onChange={(e) => updateQuestion(q.id, { placeholder: e.target.value })}
+                className="text-sm h-8"
+              />
+            </div>
+          )}
+
           {/* Dropdown options */}
           {q.type === 'dropdown' && (
             <div className="ml-6 space-y-2">

@@ -194,6 +194,7 @@ export type IssueFormQuestion = {
   id: string
   type: 'short' | 'long' | 'dropdown'
   label: string
+  placeholder?: string
   required: boolean
   options: string[]
   order: number
