@@ -66,6 +66,7 @@ export type PublicView = {
   password_hash?: string
   expires_at?: string
   allow_issue_creation: boolean
+  enabled_issue_form_ids: string[]
   created_at: string
   updated_at: string
 }
@@ -185,6 +186,24 @@ export type RoadmapComment = {
   parent_id?: string
   visitor_fingerprint?: string
   ip_hash?: string
+  created_at: string
+  updated_at: string
+}
+
+export type IssueFormQuestion = {
+  id: string
+  type: 'short' | 'long' | 'dropdown'
+  label: string
+  required: boolean
+  options: string[]
+  order: number
+}
+
+export type IssueForm = {
+  id: string
+  user_id: string
+  name: string
+  questions: IssueFormQuestion[]
   created_at: string
   updated_at: string
 }

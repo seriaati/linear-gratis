@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/select";
 import { Navigation } from "@/components/navigation";
 import { supabase, PublicView } from "@/lib/supabase";
+import type { IssueForm } from "@/lib/supabase";
 import { decryptTokenClient } from "@/lib/client-encryption";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
@@ -72,14 +73,17 @@ export default function PublicViewsPage() {
   const [allowIssueCreation, setAllowIssueCreation] = useState(false);
   const [availableStatuses, setAvailableStatuses] = useState<{ id: string; name: string; color: string; type: string }[]>([]);
   const [hiddenStatuses, setHiddenStatuses] = useState<string[]>([]);
+  const [issueForms, setIssueForms] = useState<IssueForm[]>([]);
+  const [enabledIssueFormIds, setEnabledIssueFormIds] = useState<string[]>([]);
 
   const loadUserData = useCallback(async () => {
     if (!user) return;
 
     setLoading(true);
     try {
-      // Load user profile and views in parallel
-      const [profileResult, viewsResult] = await Promise.all([
+      // Load user profile, views, and issue forms in parallel
+      const { data: { session } } = await supabase.auth.getSession();
+      const [profileResult, viewsResult, issueFormsResult] = await Promise.all([
         supabase
           .from("profiles")
           .select("linear_api_token")
@@ -90,6 +94,9 @@ export default function PublicViewsPage() {
           .select("*")
           .eq("user_id", user.id)
           .order("created_at", { ascending: false }),
+        fetch("/api/issue-forms", {
+          headers: { Authorization: `Bearer ${session?.access_token}` },
+        }).then((r) => r.json() as Promise<{ success?: boolean; issueForms?: IssueForm[] }>),
       ]);
 
       // Handle profile
@@ -113,6 +120,11 @@ export default function PublicViewsPage() {
         console.error("Error loading views:", viewsResult.error);
       } else {
         setViews(viewsResult.data || []);
+      }
+
+      // Handle issue forms
+      if (issueFormsResult.success && issueFormsResult.issueForms) {
+        setIssueForms(issueFormsResult.issueForms);
       }
     } catch (error) {
       console.error("Error loading data:", error);
@@ -270,6 +282,7 @@ export default function PublicViewsPage() {
         password_hash: passwordHash,
         is_active: true,
         allow_issue_creation: allowIssueCreation,
+        enabled_issue_form_ids: enabledIssueFormIds,
         ...sourceData,
       });
 
@@ -363,6 +376,7 @@ export default function PublicViewsPage() {
     setAllowIssueCreation(false);
     setHiddenStatuses([]);
     setAvailableStatuses([]);
+    setEnabledIssueFormIds([]);
     setShowCreateView(false);
     setEditingView(null);
     setShowEditView(false);
@@ -378,6 +392,7 @@ export default function PublicViewsPage() {
     setPassword("");
     setAllowIssueCreation(view.allow_issue_creation || false);
     setHiddenStatuses(view.hidden_statuses ?? []);
+    setEnabledIssueFormIds(view.enabled_issue_form_ids ?? []);
 
     // Set source type and selection based on existing view
     if (view.project_id) {
@@ -462,6 +477,7 @@ export default function PublicViewsPage() {
           password_protected: passwordProtected,
           password_hash: passwordHash,
           allow_issue_creation: allowIssueCreation,
+          enabled_issue_form_ids: enabledIssueFormIds,
           hidden_statuses: hiddenStatuses,
           ...sourceData,
         })
@@ -847,11 +863,60 @@ export default function PublicViewsPage() {
                 </div>
               </div>
 
-              {/* Step 5: Security Options */}
+              {/* Step 5: Issue Forms */}
+              {allowIssueCreation && (
+                <div className="space-y-4">
+                  <h3 className="font-semibold text-lg flex items-center gap-2">
+                    <div className="w-6 h-6 bg-primary text-primary-foreground rounded-full flex items-center justify-center text-sm font-bold">
+                      5
+                    </div>
+                    Issue forms (optional)
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    Select which issue forms viewers can choose from when creating an issue. If none are selected, a blank issue form is shown.
+                  </p>
+                  {issueForms.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">
+                      No issue forms created yet.{" "}
+                      <Link href="/issue-forms" className="text-primary hover:underline">
+                        Create your first issue form
+                      </Link>
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {issueForms.map((form) => {
+                        const isEnabled = enabledIssueFormIds.includes(form.id);
+                        return (
+                          <div key={form.id} className="flex items-center space-x-3">
+                            <Checkbox
+                              checked={isEnabled}
+                              onChange={() =>
+                                setEnabledIssueFormIds((prev) =>
+                                  isEnabled
+                                    ? prev.filter((id) => id !== form.id)
+                                    : [...prev, form.id]
+                                )
+                              }
+                            />
+                            <Label className="text-sm font-normal cursor-pointer">
+                              {form.name}
+                              <span className="ml-2 text-xs text-muted-foreground">
+                                {form.questions.length} question{form.questions.length !== 1 ? "s" : ""}
+                              </span>
+                            </Label>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Step 6: Security Options */}
               <div className="space-y-4">
                 <h3 className="font-semibold text-lg flex items-center gap-2">
                   <div className="w-6 h-6 bg-primary text-primary-foreground rounded-full flex items-center justify-center text-sm font-bold">
-                    5
+                    {allowIssueCreation ? "6" : "5"}
                   </div>
                   Security options
                 </h3>
@@ -1137,11 +1202,60 @@ export default function PublicViewsPage() {
                 </div>
               </div>
 
+              {/* Issue Forms (Edit) */}
+              {allowIssueCreation && (
+                <div className="space-y-4">
+                  <h3 className="font-semibold text-lg flex items-center gap-2">
+                    <div className="w-6 h-6 bg-primary text-primary-foreground rounded-full flex items-center justify-center text-sm font-bold">
+                      5
+                    </div>
+                    Issue forms (optional)
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    Select which issue forms viewers can choose from when creating an issue. If none are selected, a blank issue form is shown.
+                  </p>
+                  {issueForms.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">
+                      No issue forms created yet.{" "}
+                      <Link href="/issue-forms" className="text-primary hover:underline">
+                        Create your first issue form
+                      </Link>
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {issueForms.map((form) => {
+                        const isEnabled = enabledIssueFormIds.includes(form.id);
+                        return (
+                          <div key={form.id} className="flex items-center space-x-3">
+                            <Checkbox
+                              checked={isEnabled}
+                              onChange={() =>
+                                setEnabledIssueFormIds((prev) =>
+                                  isEnabled
+                                    ? prev.filter((id) => id !== form.id)
+                                    : [...prev, form.id]
+                                )
+                              }
+                            />
+                            <Label className="text-sm font-normal cursor-pointer">
+                              {form.name}
+                              <span className="ml-2 text-xs text-muted-foreground">
+                                {form.questions.length} question{form.questions.length !== 1 ? "s" : ""}
+                              </span>
+                            </Label>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Security Options */}
               <div className="space-y-4">
                 <h3 className="font-semibold text-lg flex items-center gap-2">
                   <div className="w-6 h-6 bg-primary text-primary-foreground rounded-full flex items-center justify-center text-sm font-bold">
-                    5
+                    {allowIssueCreation ? "6" : "5"}
                   </div>
                   Security options
                 </h3>

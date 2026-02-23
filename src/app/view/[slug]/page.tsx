@@ -8,8 +8,9 @@ import { IssueCreationModal } from '@/components/issue-creation-modal'
 import { IssueDetailModal } from '@/components/issue-detail-modal'
 import { ProjectUpdatesModal } from '@/components/project-updates-modal'
 import { PublicView } from '@/lib/supabase'
+import type { IssueFormQuestion } from '@/lib/supabase'
 import { LinearIssue } from '@/app/api/linear/issues/route'
-import { RefreshCw, Lock } from 'lucide-react'
+import { RefreshCw, Lock, ChevronDown } from 'lucide-react'
 import { useBrandingSettings, applyBrandingToPage, getBrandingStyles } from '@/hooks/use-branding'
 
 interface PublicViewPageProps {
@@ -50,7 +51,11 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
   const [showProjectUpdates, setShowProjectUpdates] = useState(false)
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null)
   const [defaultStateName, setDefaultStateName] = useState<string | undefined>(undefined)
+  const [enabledForms, setEnabledForms] = useState<{ id: string; name: string; questions: IssueFormQuestion[] }[]>([])
+  const [showNewIssueDropdown, setShowNewIssueDropdown] = useState(false)
+  const [selectedFormQuestions, setSelectedFormQuestions] = useState<IssueFormQuestion[] | undefined>(undefined)
   const filterButtonRef = useRef<HTMLButtonElement>(null)
+  const newIssueButtonRef = useRef<HTMLDivElement>(null)
 
   // Load branding settings for this view's owner
   const { branding } = useBrandingSettings(view?.user_id || null)
@@ -138,9 +143,16 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
     }
   }
 
-  const handleCreateIssue = (columnName?: string) => {
+  const handleCreateIssue = (columnName?: string, formId?: string) => {
     setDefaultStateName(columnName)
+    if (formId) {
+      const form = enabledForms.find(f => f.id === formId)
+      setSelectedFormQuestions(form?.questions)
+    } else {
+      setSelectedFormQuestions(undefined)
+    }
     setShowIssueModal(true)
+    setShowNewIssueDropdown(false)
   }
 
   const handleIssueClick = (issueId: string) => {
@@ -200,6 +212,36 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
       applyBrandingToPage(branding)
     }
   }, [branding])
+
+  // Load enabled issue forms for this view
+  useEffect(() => {
+    if (!view?.allow_issue_creation || !view?.enabled_issue_form_ids?.length || !slug) return
+    fetch(`/api/public-view/${slug}/issue-forms`)
+      .then(res => res.json() as Promise<{ success?: boolean; forms?: { id: string; name: string; questions: IssueFormQuestion[] }[] }>)
+      .then((data) => {
+        if (data.success && data.forms) {
+          setEnabledForms(data.forms)
+        }
+      })
+      .catch(console.error)
+  }, [view, slug])
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        showNewIssueDropdown &&
+        newIssueButtonRef.current &&
+        !newIssueButtonRef.current.contains(event.target as Node)
+      ) {
+        setShowNewIssueDropdown(false)
+      }
+    }
+    if (showNewIssueDropdown) {
+      document.addEventListener('mousedown', handleClickOutside)
+      return () => document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [showNewIssueDropdown])
 
   const hasActiveFilters = () => {
     return filters.search ||
@@ -433,16 +475,69 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
 
           <div className="flex items-center gap-2">
             {view.allow_issue_creation && (
-              <button
-                onClick={() => handleCreateIssue()}
-                className="flex items-center gap-2 px-2 sm:px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
-                aria-label="Create issue"
-              >
-                <svg className="h-4 w-4" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M8.75 4C8.75 3.58579 8.41421 3.25 8 3.25C7.58579 3.25 7.25 3.58579 7.25 4V7.25H4C3.58579 7.25 3.25 7.58579 3.25 8C3.25 8.41421 3.58579 8.75 4 8.75H7.25V12C7.25 12.4142 7.58579 12.75 8 12.75C8.41421 12.75 8.75 12.4142 8.75 12V8.75H12C12.4142 8.75 12.75 8.41421 12.75 8C12.75 7.58579 12.4142 7.25 12 7.25H8.75V4Z" />
-                </svg>
-                <span className="hidden sm:inline">New issue</span>
-              </button>
+              <div className="relative" ref={newIssueButtonRef}>
+                {enabledForms.length > 0 ? (
+                  <>
+                    <button
+                      onClick={() => setShowNewIssueDropdown(!showNewIssueDropdown)}
+                      className="flex items-center gap-2 px-2 sm:px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
+                      aria-label="Create issue"
+                    >
+                      <svg className="h-4 w-4" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M8.75 4C8.75 3.58579 8.41421 3.25 8 3.25C7.58579 3.25 7.25 3.58579 7.25 4V7.25H4C3.58579 7.25 3.25 7.58579 3.25 8C3.25 8.41421 3.58579 8.75 4 8.75H7.25V12C7.25 12.4142 7.58579 12.75 8 12.75C8.41421 12.75 8.75 12.4142 8.75 12V8.75H12C12.4142 8.75 12.75 8.41421 12.75 8C12.75 7.58579 12.4142 7.25 12 7.25H8.75V4Z" />
+                      </svg>
+                      <span className="hidden sm:inline">New issue</span>
+                      <ChevronDown className="h-3 w-3" />
+                    </button>
+
+                    {showNewIssueDropdown && (
+                      <div
+                        className="absolute right-0 top-full mt-1 z-[60] min-w-[180px] overflow-hidden rounded-md py-1"
+                        style={{
+                          backgroundColor: 'lch(10.633 1.867 272)',
+                          border: '0.5px solid lch(24.833 4.707 272)',
+                          boxShadow: 'lch(0 0 0 / 0.15) 0px 4px 20px',
+                        }}
+                      >
+                        {enabledForms.map(form => (
+                          <button
+                            key={form.id}
+                            type="button"
+                            onClick={() => handleCreateIssue(undefined, form.id)}
+                            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left transition-colors hover:bg-white/10"
+                            style={{ color: 'lch(91.223 1.933 272)' }}
+                          >
+                            {form.name}
+                          </button>
+                        ))}
+                        <div
+                          className="my-1 h-px mx-1"
+                          style={{ backgroundColor: 'lch(24.833 4.707 272)' }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleCreateIssue()}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left transition-colors hover:bg-white/10"
+                          style={{ color: 'lch(64.892% 1.933 272)' }}
+                        >
+                          Blank issue
+                        </button>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <button
+                    onClick={() => handleCreateIssue()}
+                    className="flex items-center gap-2 px-2 sm:px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
+                    aria-label="Create issue"
+                  >
+                    <svg className="h-4 w-4" viewBox="0 0 16 16" fill="currentColor">
+                      <path d="M8.75 4C8.75 3.58579 8.41421 3.25 8 3.25C7.58579 3.25 7.25 3.58579 7.25 4V7.25H4C3.58579 7.25 3.25 7.58579 3.25 8C3.25 8.41421 3.58579 8.75 4 8.75H7.25V12C7.25 12.4142 7.58579 12.75 8 12.75C8.41421 12.75 8.75 12.4142 8.75 12V8.75H12C12.4142 8.75 12.75 8.41421 12.75 8C12.75 7.58579 12.4142 7.25 12 7.25H8.75V4Z" />
+                    </svg>
+                    <span className="hidden sm:inline">New issue</span>
+                  </button>
+                )}
+              </div>
             )}
           </div>
         </div>
@@ -515,6 +610,7 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
         onClose={() => {
           setShowIssueModal(false)
           setDefaultStateName(undefined)
+          setSelectedFormQuestions(undefined)
         }}
         onSubmit={handleSubmitIssue}
         teamName={view?.team_name}
@@ -524,6 +620,7 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
         apiToken="dummy"
         viewSlug={slug}
         defaultStateName={defaultStateName}
+        issueFormQuestions={selectedFormQuestions}
       />
 
       {/* Issue Detail Modal */}

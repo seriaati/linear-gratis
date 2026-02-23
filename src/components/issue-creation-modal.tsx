@@ -5,6 +5,15 @@ import Image from 'next/image'
 import { Button } from '@/components/ui/button'
 import { X, Maximize2, ChevronDown } from 'lucide-react'
 
+interface IssueFormQuestion {
+  id: string
+  type: 'short' | 'long' | 'dropdown'
+  label: string
+  required: boolean
+  options: string[]
+  order: number
+}
+
 interface IssueCreationModalProps {
   isOpen: boolean
   onClose: () => void
@@ -16,6 +25,7 @@ interface IssueCreationModalProps {
   apiToken?: string
   viewSlug?: string
   defaultStateName?: string
+  issueFormQuestions?: IssueFormQuestion[]
 }
 
 interface IssueFormData {
@@ -137,7 +147,8 @@ export function IssueCreationModal({
   teamId,
   projectId,
   viewSlug,
-  defaultStateName
+  defaultStateName,
+  issueFormQuestions,
 }: IssueCreationModalProps) {
   const [formData, setFormData] = useState<IssueFormData>({
     title: '',
@@ -159,6 +170,7 @@ export function IssueCreationModal({
   const [showAssigneeDropdown, setShowAssigneeDropdown] = useState(false)
   const [showLabelsDropdown, setShowLabelsDropdown] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({})
 
   const titleRef = useRef<HTMLDivElement>(null)
   const descriptionRef = useRef<HTMLDivElement>(null)
@@ -168,10 +180,17 @@ export function IssueCreationModal({
   const labelsDropdownRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (isOpen && titleRef.current) {
-      titleRef.current.focus()
+    if (isOpen) {
+      if (titleRef.current) {
+        titleRef.current.focus()
+      }
+      // Reset question answers when modal opens (new form or blank)
+      setQuestionAnswers({})
+      setFormData(prev => ({ ...prev, title: '', description: '' }))
+      if (titleRef.current) titleRef.current.textContent = ''
+      if (descriptionRef.current) descriptionRef.current.textContent = ''
     }
-  }, [isOpen])
+  }, [isOpen, issueFormQuestions])
 
 
   useEffect(() => {
@@ -263,12 +282,36 @@ export function IssueCreationModal({
       return
     }
 
+    // Validate required questions
+    if (issueFormQuestions && issueFormQuestions.length > 0) {
+      const unanswered = issueFormQuestions.filter(
+        q => q.required && !(questionAnswers[q.id] || '').trim()
+      )
+      if (unanswered.length > 0) {
+        setError(`Please answer required question: "${unanswered[0].label}"`)
+        return
+      }
+    }
+
     setError(null)
     setIsSubmitting(true)
 
     try {
+      // Build description from structured form answers if issue form questions are present
+      let description = formData.description
+      if (issueFormQuestions && issueFormQuestions.length > 0) {
+        const sortedQuestions = [...issueFormQuestions].sort((a, b) => a.order - b.order)
+        description = sortedQuestions
+          .map(q => {
+            const answer = questionAnswers[q.id] || ''
+            return `**${q.label}**\n${answer}`
+          })
+          .join('\n\n')
+      }
+
       const submitData = {
         ...formData,
+        description,
         stateId: selectedState?.id,
         assigneeId: selectedAssignee?.id,
         labelIds: selectedLabels.map(label => label.id),
@@ -392,22 +435,91 @@ export function IssueCreationModal({
                 />
               </div>
 
-              <div className="min-h-[120px]">
-                <div
-                  ref={descriptionRef}
-                  contentEditable
-                  suppressContentEditableWarning
-                  onInput={handleDescriptionInput}
-                  className="w-full p-3 bg-transparent border-none outline-none resize-none text-foreground placeholder-muted-foreground"
-                  style={{
-                    minHeight: '80px',
-                    lineHeight: '1.6',
-                    fontFamily: 'var(--font-regular)',
-                  }}
-                  data-placeholder="Add description…"
-                  onFocus={() => setError(null)}
-                />
-              </div>
+              {issueFormQuestions && issueFormQuestions.length > 0 ? (
+                /* Structured form fields from issue form template */
+                <div className="space-y-4 px-3 pb-2">
+                  {[...issueFormQuestions].sort((a, b) => a.order - b.order).map(q => (
+                    <div key={q.id} className="space-y-1.5">
+                      <label
+                        className="text-sm font-medium"
+                        style={{ color: 'lch(91.223 1.933 272)' }}
+                      >
+                        {q.label}
+                        {q.required && <span className="text-red-400 ml-1">*</span>}
+                      </label>
+                      {q.type === 'short' && (
+                        <input
+                          type="text"
+                          value={questionAnswers[q.id] || ''}
+                          onChange={e => setQuestionAnswers(prev => ({ ...prev, [q.id]: e.target.value }))}
+                          onFocus={() => setError(null)}
+                          className="w-full px-3 py-2 rounded text-sm outline-none"
+                          style={{
+                            backgroundColor: 'lch(8.3 1.867 272)',
+                            border: '0.5px solid lch(24.833 4.707 272)',
+                            color: 'lch(91.223 1.933 272)',
+                            fontFamily: 'var(--font-regular)',
+                          }}
+                          placeholder="Your answer"
+                        />
+                      )}
+                      {q.type === 'long' && (
+                        <textarea
+                          value={questionAnswers[q.id] || ''}
+                          onChange={e => setQuestionAnswers(prev => ({ ...prev, [q.id]: e.target.value }))}
+                          onFocus={() => setError(null)}
+                          rows={3}
+                          className="w-full px-3 py-2 rounded text-sm outline-none resize-none"
+                          style={{
+                            backgroundColor: 'lch(8.3 1.867 272)',
+                            border: '0.5px solid lch(24.833 4.707 272)',
+                            color: 'lch(91.223 1.933 272)',
+                            fontFamily: 'var(--font-regular)',
+                          }}
+                          placeholder="Your answer"
+                        />
+                      )}
+                      {q.type === 'dropdown' && (
+                        <select
+                          value={questionAnswers[q.id] || ''}
+                          onChange={e => setQuestionAnswers(prev => ({ ...prev, [q.id]: e.target.value }))}
+                          onFocus={() => setError(null)}
+                          className="w-full px-3 py-2 rounded text-sm outline-none"
+                          style={{
+                            backgroundColor: 'lch(8.3 1.867 272)',
+                            border: '0.5px solid lch(24.833 4.707 272)',
+                            color: 'lch(91.223 1.933 272)',
+                            fontFamily: 'var(--font-regular)',
+                          }}
+                        >
+                          <option value="">Select an option</option>
+                          {q.options.map((opt, i) => (
+                            <option key={i} value={opt}>{opt}</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                /* Default blank description contenteditable */
+                <div className="min-h-[120px]">
+                  <div
+                    ref={descriptionRef}
+                    contentEditable
+                    suppressContentEditableWarning
+                    onInput={handleDescriptionInput}
+                    className="w-full p-3 bg-transparent border-none outline-none resize-none text-foreground placeholder-muted-foreground"
+                    style={{
+                      minHeight: '80px',
+                      lineHeight: '1.6',
+                      fontFamily: 'var(--font-regular)',
+                    }}
+                    data-placeholder="Add description…"
+                    onFocus={() => setError(null)}
+                  />
+                </div>
+              )}
             </div>
 
             {/* Issue properties */}

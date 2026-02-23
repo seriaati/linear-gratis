@@ -62,6 +62,11 @@ export function Navigation() {
                     Roadmaps
                   </Button>
                 </Link>
+                <Link href="/issue-forms">
+                  <Button variant="ghost" size="sm" className="font-medium">
+                    Issue forms
+                  </Button>
+                </Link>
                 <Link href="/views">
                   <Button variant="ghost" size="sm" className="font-medium">
                     Public views
