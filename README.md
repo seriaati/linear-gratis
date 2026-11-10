@@ -42,7 +42,6 @@ progress, or publish a roadmap.
 - Encrypted Linear API token storage with lazy legacy-token rotation.
 - Schema-level publishable-resource model with cross-type slug uniqueness.
 - SQL migration, rollback and invariant-test coverage for the core tenancy model.
-- [Signed review and answer integrations](docs/review-integrations.md) with private per-view policies and configurable workflows.
 
 ## Architecture
 

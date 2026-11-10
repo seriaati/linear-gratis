@@ -16,10 +16,6 @@ import {
   isV2Ciphertext,
 } from '../src/lib/encryption-v2'
 import {
-  createWebhookSignature,
-  verifyWebhookSignature,
-} from '../src/lib/webhook-signature'
-import {
   createDeterministicRandom,
   deterministicText,
 } from './helpers/deterministic'
@@ -135,36 +131,6 @@ describe('token encryption', () => {
     } finally {
       if (key === undefined) delete process.env.ENCRYPTION_KEY
       else process.env.ENCRYPTION_KEY = key
-    }
-  })
-})
-
-describe('webhook signatures', () => {
-  test('accepts the exact signature among comma-separated candidates', () => {
-    const body = JSON.stringify({ event: 'feedback.created', id: 'feedback-1' })
-    const signature = createWebhookSignature(body, 'webhook-secret')
-
-    assert.match(signature, /^sha256=[a-f0-9]{64}$/)
-    assert.equal(verifyWebhookSignature(body, 'webhook-secret', signature), true)
-    assert.equal(
-      verifyWebhookSignature(body, 'webhook-secret', `sha256=bad, ${signature}, sha256=also-bad`),
-      true,
-    )
-    assert.equal(verifyWebhookSignature(body, 'webhook-secret', null), false)
-  })
-
-  test('is sensitive to body and secret changes over fuzzed payloads', () => {
-    const next = createDeterministicRandom(0x51a7e)
-
-    for (let index = 0; index < 1_000; index += 1) {
-      const body = deterministicText(next, 64)
-      const secret = deterministicText(next, 48)
-      const signature = createWebhookSignature(body, secret)
-
-      assert.equal(verifyWebhookSignature(body, secret, signature), true)
-      assert.equal(verifyWebhookSignature(`${body}.`, secret, signature), false)
-      assert.equal(verifyWebhookSignature(body, `${secret}.`, signature), false)
-      assert.equal(verifyWebhookSignature(body, secret, tamper(signature)), false)
     }
   })
 })

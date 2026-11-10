@@ -27,7 +27,6 @@ const EXPECTED_PRODUCTION_FILES = [
   'src/lib/structured-data.tsx',
   'src/lib/supabase-errors.ts',
   'src/lib/utils.ts',
-  'src/lib/webhook-signature.ts',
 ]
 
 function percentage(covered, total) {
