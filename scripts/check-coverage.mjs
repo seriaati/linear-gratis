@@ -16,7 +16,6 @@ const EXPECTED_PRODUCTION_FILES = [
   'src/lib/attachment-markdown.ts',
   'src/lib/encryption-v2.ts',
   'src/lib/encryption.ts',
-  'src/lib/form-attachment.ts',
   'src/lib/ip-hash.ts',
   'src/lib/issue-filters.ts',
   'src/lib/linear.ts',

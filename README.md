@@ -115,7 +115,6 @@ The local template lives in [.env.example](.env.example).
 | `CLOUDFLARE_API_TOKEN` | For custom domains | Cloudflare API token for DNS and hostname verification checks. |
 | `CLOUDFLARE_ACCOUNT_ID` | For custom domains | Cloudflare account id used with the API token. |
 | `CLOUDFLARE_ZONE_ID` | For custom domains | Cloudflare zone ID used to manage custom hostnames. |
-| `FEEDBACK_WEBHOOK_SECRET` | For signed feedback | Shared HMAC secret for inbound public-view feedback webhooks. |
 | `NEXT_PUBLIC_APP_DOMAIN` | Recommended | Canonical app domain used for custom-domain CNAME instructions. |
 | `SUPABASE_DB_HOST` | Deployments | Production database host used only by the migration gate. |
 | `SUPABASE_DB_PORT` | Deployments | Production database port, normally `5432`. |

@@ -46,11 +46,6 @@ describe('API route contracts', () => {
         'checkRateLimit',
         'getClientIp',
       ],
-      'src/app/api/public-view/[slug]/feedback/route.ts': [
-        'verifyWebhookSignature',
-        'checkRateLimit',
-        'getClientIp',
-      ],
       'src/app/api/public-view/[slug]/issue/[issueId]/route.ts': [
         'authorisePublicView',
       ],
