@@ -3,13 +3,10 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import Image from 'next/image'
 import { Button } from '@/components/ui/button'
-import { X, Maximize2, ChevronDown } from 'lucide-react'
-import { AttachmentUploadDropzone } from '@/components/attachment-upload-dropzone'
+import { X, Maximize2, ChevronDown, Paperclip } from 'lucide-react'
 import { StateIcon } from '@/components/state-icon'
-import {
-  MAX_FORM_ATTACHMENT_FILES,
-  validateFormAttachmentFile,
-} from '@/lib/form-attachment'
+import { MAX_ISSUE_IMAGES, ISSUE_IMAGE_TYPES, validateIssueImages } from '@/lib/issue-images'
+import type { IssueFormQuestion } from '@/lib/supabase'
 
 interface IssueCreationModalProps {
   isOpen: boolean
@@ -22,6 +19,8 @@ interface IssueCreationModalProps {
   apiToken?: string
   viewSlug?: string
   defaultStateName?: string
+  issueFormQuestions?: IssueFormQuestion[]
+  allowImageUploads?: boolean
 }
 
 interface IssueFormData {
@@ -33,7 +32,7 @@ interface IssueFormData {
   projectId?: string
   teamId?: string
   labelIds: string[]
-  attachmentFiles?: File[]
+  images?: File[]
 }
 
 interface WorkflowState {
@@ -66,6 +65,11 @@ interface Metadata {
   labels: Label[]
   triageEnabled?: boolean
   triageIssueState?: WorkflowState
+}
+
+interface PendingImage {
+  file: File
+  previewUrl: string
 }
 
 const priorities = [
@@ -133,7 +137,9 @@ export function IssueCreationModal({
   teamId,
   projectId,
   viewSlug,
-  defaultStateName
+  defaultStateName,
+  issueFormQuestions,
+  allowImageUploads,
 }: IssueCreationModalProps) {
   const [formData, setFormData] = useState<IssueFormData>({
     title: '',
@@ -155,8 +161,9 @@ export function IssueCreationModal({
   const [showAssigneeDropdown, setShowAssigneeDropdown] = useState(false)
   const [showLabelsDropdown, setShowLabelsDropdown] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [attachmentFiles, setAttachmentFiles] = useState<File[]>([])
-  const [attachmentError, setAttachmentError] = useState<string | null>(null)
+  const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({})
+  const [images, setImages] = useState<PendingImage[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const titleRef = useRef<HTMLDivElement>(null)
   const descriptionRef = useRef<HTMLDivElement>(null)
@@ -166,10 +173,21 @@ export function IssueCreationModal({
   const labelsDropdownRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (isOpen && titleRef.current) {
-      titleRef.current.focus()
+    if (isOpen) {
+      if (titleRef.current) {
+        titleRef.current.focus()
+      }
+      // Reset question answers when modal opens (new form or blank)
+      setQuestionAnswers({})
+      setFormData(prev => ({ ...prev, title: '', description: '' }))
+      if (titleRef.current) titleRef.current.textContent = ''
+      if (descriptionRef.current) descriptionRef.current.textContent = ''
+      setImages(prev => {
+        prev.forEach(image => URL.revokeObjectURL(image.previewUrl))
+        return []
+      })
     }
-  }, [isOpen])
+  }, [isOpen, issueFormQuestions])
 
 
   useEffect(() => {
@@ -258,8 +276,11 @@ export function IssueCreationModal({
     })
     setSelectedAssignee(null)
     setSelectedLabels([])
-    setAttachmentFiles([])
-    setAttachmentError(null)
+    setQuestionAnswers({})
+    setImages(prev => {
+      prev.forEach(image => URL.revokeObjectURL(image.previewUrl))
+      return []
+    })
 
     if (titleRef.current) titleRef.current.textContent = ''
     if (descriptionRef.current) descriptionRef.current.textContent = ''
@@ -279,16 +300,40 @@ export function IssueCreationModal({
       return
     }
 
+    // Validate required questions
+    if (issueFormQuestions && issueFormQuestions.length > 0) {
+      const unanswered = issueFormQuestions.filter(
+        q => q.required && !(questionAnswers[q.id] || '').trim()
+      )
+      if (unanswered.length > 0) {
+        setError(`Please answer required question: "${unanswered[0].label}"`)
+        return
+      }
+    }
+
     setError(null)
     setIsSubmitting(true)
 
     try {
+      // Build description from structured form answers if issue form questions are present
+      let description = formData.description
+      if (issueFormQuestions && issueFormQuestions.length > 0) {
+        const sortedQuestions = [...issueFormQuestions].sort((a, b) => a.order - b.order)
+        description = sortedQuestions
+          .map(q => {
+            const answer = questionAnswers[q.id] || ''
+            return `**${q.label}**\n${answer}`
+          })
+          .join('\n\n')
+      }
+
       const submitData = {
         ...formData,
+        description,
         stateId: selectedState?.id,
         assigneeId: selectedAssignee?.id,
         labelIds: selectedLabels.map(label => label.id),
-        attachmentFiles,
+        images: images.map(image => image.file),
       }
       await onSubmit(submitData)
       resetDraft()
@@ -311,65 +356,36 @@ export function IssueCreationModal({
     setFormData(prev => ({ ...prev, description: text }))
   }
 
-  const normaliseAttachmentFile = (file: File) => {
-    if (file.name.trim()) return file
-
-    const rawExtension = file.type.split('/')[1] || 'png'
-    const extension = rawExtension === 'jpeg' ? 'jpg' : rawExtension
-    return new File([file], `screenshot-${Date.now()}.${extension}`, {
-      type: file.type || 'image/png',
-      lastModified: file.lastModified,
-    })
+  const addImages = (files: File[]) => {
+    const validationError = validateIssueImages([...images.map(image => image.file), ...files])
+    if (validationError) {
+      setError(validationError)
+      return
+    }
+    setError(null)
+    setImages(prev => [
+      ...prev,
+      ...files.map(file => ({ file, previewUrl: URL.createObjectURL(file) })),
+    ])
   }
 
-  const addAttachmentFiles = (files: File[]) => {
-    setAttachmentError(null)
-    if (files.length === 0) return false
-
-    const acceptedFiles: File[] = []
-    for (const file of files) {
-      if (attachmentFiles.length + acceptedFiles.length >= MAX_FORM_ATTACHMENT_FILES) {
-        setAttachmentError(`You can attach up to ${MAX_FORM_ATTACHMENT_FILES} files`)
-        break
-      }
-
-      const normalisedFile = normaliseAttachmentFile(file)
-      const validation = validateFormAttachmentFile(normalisedFile)
-      if (!validation.ok) {
-        setAttachmentError(validation.error)
-        continue
-      }
-
-      acceptedFiles.push(normalisedFile)
-    }
-
-    if (acceptedFiles.length > 0) {
-      setAttachmentFiles(prev => [...prev, ...acceptedFiles])
-      return true
-    }
-
-    return false
+  const removeImage = (index: number) => {
+    URL.revokeObjectURL(images[index].previewUrl)
+    setImages(prev => prev.filter((_, i) => i !== index))
   }
 
-  const handleDescriptionPaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
+  const handlePaste = (e: React.ClipboardEvent) => {
+    if (!allowImageUploads) return
     const files = Array.from(e.clipboardData.files).filter(file => file.type.startsWith('image/'))
     if (files.length === 0) return
-
     e.preventDefault()
-    addAttachmentFiles(files)
+    addImages(files)
   }
 
-  const handleDescriptionDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    const files = Array.from(e.dataTransfer.files)
-    if (files.length === 0) return
-
+  const handleDrop = (e: React.DragEvent) => {
+    if (!allowImageUploads) return
     e.preventDefault()
-    addAttachmentFiles(files)
-  }
-
-  const removeAttachmentFile = (index: number) => {
-    setAttachmentFiles(prev => prev.filter((_, fileIndex) => fileIndex !== index))
-    setAttachmentError(null)
+    addImages(Array.from(e.dataTransfer.files))
   }
 
   const handleTitleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -403,7 +419,14 @@ export function IssueCreationModal({
         }}
       >
         <div style={{ minHeight: '100px', width: '100%' }}>
-          <form onSubmit={handleSubmit} className="w-full" tabIndex={-1}>
+          <form
+            onSubmit={handleSubmit}
+            onPaste={handlePaste}
+            onDragOver={allowImageUploads ? e => e.preventDefault() : undefined}
+            onDrop={handleDrop}
+            className="w-full"
+            tabIndex={-1}
+          >
             {/* Toolbar */}
             <div className="flex items-center justify-between p-3 border-b" style={{ borderColor: 'lch(24.833 4.707 272)' }}>
               <div className="flex items-center gap-2">
@@ -471,15 +494,80 @@ export function IssueCreationModal({
                 />
               </div>
 
+              {issueFormQuestions && issueFormQuestions.length > 0 ? (
+                /* Structured form fields from issue form template */
+                <div className="space-y-4 px-3 pb-2">
+                  {[...issueFormQuestions].sort((a, b) => a.order - b.order).map(q => (
+                    <div key={q.id} className="space-y-1.5">
+                      <label
+                        className="text-sm font-medium"
+                        style={{ color: 'lch(91.223 1.933 272)' }}
+                      >
+                        {q.label}
+                        {q.required && <span className="text-red-400 ml-1">*</span>}
+                      </label>
+                      {q.type === 'short' && (
+                        <input
+                          type="text"
+                          value={questionAnswers[q.id] || ''}
+                          onChange={e => setQuestionAnswers(prev => ({ ...prev, [q.id]: e.target.value }))}
+                          onFocus={() => setError(null)}
+                          className="w-full px-3 py-2 rounded text-sm outline-none"
+                          style={{
+                            backgroundColor: 'lch(8.3 1.867 272)',
+                            border: '0.5px solid lch(24.833 4.707 272)',
+                            color: 'lch(91.223 1.933 272)',
+                            fontFamily: 'var(--font-regular)',
+                          }}
+                          placeholder={q.placeholder || 'Your answer'}
+                        />
+                      )}
+                      {q.type === 'long' && (
+                        <textarea
+                          value={questionAnswers[q.id] || ''}
+                          onChange={e => setQuestionAnswers(prev => ({ ...prev, [q.id]: e.target.value }))}
+                          onFocus={() => setError(null)}
+                          rows={3}
+                          className="w-full px-3 py-2 rounded text-sm outline-none resize-none"
+                          style={{
+                            backgroundColor: 'lch(8.3 1.867 272)',
+                            border: '0.5px solid lch(24.833 4.707 272)',
+                            color: 'lch(91.223 1.933 272)',
+                            fontFamily: 'var(--font-regular)',
+                          }}
+                          placeholder={q.placeholder || 'Your answer'}
+                        />
+                      )}
+                      {q.type === 'dropdown' && (
+                        <select
+                          value={questionAnswers[q.id] || ''}
+                          onChange={e => setQuestionAnswers(prev => ({ ...prev, [q.id]: e.target.value }))}
+                          onFocus={() => setError(null)}
+                          className="w-full px-3 py-2 rounded text-sm outline-none"
+                          style={{
+                            backgroundColor: 'lch(8.3 1.867 272)',
+                            border: '0.5px solid lch(24.833 4.707 272)',
+                            color: 'lch(91.223 1.933 272)',
+                            fontFamily: 'var(--font-regular)',
+                          }}
+                        >
+                          <option value="">Select an option</option>
+                          {q.options.map((opt, i) => (
+                            <option key={i} value={opt}>{opt}</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                /* Default blank description contenteditable */
                 <div className="min-h-[120px]">
                   <div
                     ref={descriptionRef}
                     contentEditable
                     suppressContentEditableWarning
                     onInput={handleDescriptionInput}
-                    onPaste={handleDescriptionPaste}
-                    onDrop={handleDescriptionDrop}
-                    onDragOver={(e) => e.preventDefault()}
                     className="w-full p-3 bg-transparent border-none outline-none resize-none text-foreground placeholder-muted-foreground"
                     style={{
                       minHeight: '80px',
@@ -489,19 +577,33 @@ export function IssueCreationModal({
                     data-placeholder="Add description…"
                     onFocus={() => setError(null)}
                   />
-                  <div className="mt-4">
-                    <AttachmentUploadDropzone
-                      files={attachmentFiles}
-                      error={attachmentError}
-                      busy={isSubmitting}
-                      disabled={isSubmitting}
-                      maxFiles={MAX_FORM_ATTACHMENT_FILES}
-                      onFilesAdded={addAttachmentFiles}
-                      onRemoveFile={removeAttachmentFile}
-                    />
-                  </div>
                 </div>
-              </div>
+              )}
+
+              {images.length > 0 && (
+                <div className="flex flex-wrap gap-2 px-3 pt-2">
+                  {images.map((image, index) => (
+                    <div
+                      key={image.previewUrl}
+                      className="relative w-16 h-16 rounded overflow-hidden group"
+                      style={{ border: '0.5px solid lch(24.833 4.707 272)' }}
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={image.previewUrl} alt={image.file.name} className="w-full h-full object-cover" />
+                      <button
+                        type="button"
+                        onClick={() => removeImage(index)}
+                        className="absolute top-0.5 right-0.5 p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                        style={{ backgroundColor: 'lch(10.633 1.867 272 / 0.85)' }}
+                        aria-label={`Remove ${image.file.name}`}
+                      >
+                        <X className="w-3 h-3" style={{ color: 'lch(91.223 1.933 272)' }} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
             {/* Issue properties */}
             <div className="flex items-center gap-2 px-4 py-3 border-t flex-wrap" style={{ borderColor: 'lch(24.833 4.707 272)' }}>
@@ -794,7 +896,34 @@ export function IssueCreationModal({
             </div>
 
             {/* Footer */}
-            <div className="flex items-center justify-end gap-3 px-4 py-3 border-t" style={{ borderColor: 'lch(24.833 4.707 272)' }}>
+            <div className="flex items-center justify-between px-4 py-3 border-t" style={{ borderColor: 'lch(24.833 4.707 272)' }}>
+              <div>
+                {allowImageUploads && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={images.length >= MAX_ISSUE_IMAGES || isSubmitting}
+                      className="p-2 hover:bg-accent rounded transition-colors disabled:opacity-50 disabled:pointer-events-none"
+                      aria-label="Attach images"
+                      title={`Attach images (up to ${MAX_ISSUE_IMAGES})`}
+                    >
+                      <Paperclip className="w-4 h-4" style={{ color: 'lch(64.892% 1.933 272 / 1)' }} />
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept={ISSUE_IMAGE_TYPES.join(',')}
+                      multiple
+                      className="hidden"
+                      onChange={e => {
+                        addImages(Array.from(e.target.files ?? []))
+                        e.target.value = ''
+                      }}
+                    />
+                  </>
+                )}
+              </div>
               <Button
                 type="submit"
                 disabled={!formData.title.trim() || isSubmitting}

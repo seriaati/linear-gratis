@@ -149,9 +149,12 @@ async function respondWithViewPayload(view: PublicView): Promise<NextResponse> {
   // Strip out any issues the view owner has excluded. Filtering happens
   // server-side so excluded IDs never leave the server.
   const excludedIds = new Set<string>(view.excluded_issue_ids ?? []);
+  const hiddenStatuses = new Set<string>(view.hidden_statuses ?? []);
   const visibleIssues =
-    excludedIds.size > 0
-      ? issuesResult.issues.filter((issue) => !excludedIds.has(issue.id))
+    excludedIds.size > 0 || hiddenStatuses.size > 0
+      ? issuesResult.issues.filter(
+          (issue) => !excludedIds.has(issue.id) && !hiddenStatuses.has(issue.state.name)
+        )
       : issuesResult.issues;
   const redactedIssues = visibleIssues.map((issue) =>
     redactPublicViewIssue(issue, view)
@@ -180,6 +183,8 @@ async function respondWithViewPayload(view: PublicView): Promise<NextResponse> {
       allowed_label_ids: view.allowed_label_ids ?? [],
       password_protected: view.password_protected,
       allow_issue_creation: view.allow_issue_creation,
+      allow_image_uploads: view.allow_image_uploads ?? false,
+      enabled_issue_form_ids: view.enabled_issue_form_ids ?? [],
       created_at: view.created_at,
     },
     issues: redactedIssues,

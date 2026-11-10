@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Plus } from 'lucide-react'
+import { Plus, ChevronDown } from 'lucide-react'
 import type { LinearIssue } from '@/app/api/linear/issues/route'
 import type { PublicView } from '@/lib/supabase'
 import { KanbanBoard } from '@/components/kanban-board'
@@ -26,7 +26,8 @@ interface IssuesViewProps {
   issues: LinearIssue[]
   view: PublicView
   onIssueClick: (id: string) => void
-  onCreateIssue: (stateName?: string) => void
+  onCreateIssue: (stateName?: string, formId?: string) => void
+  issueForms?: Array<{ id: string; name: string }>
 }
 
 const TABS: Array<{ value: IssueTab; label: string }> = [
@@ -71,7 +72,7 @@ function getVisibleFilterOptions(issues: LinearIssue[], view: PublicView): Filte
   }
 }
 
-export function IssuesView({ issues, view, onIssueClick, onCreateIssue }: IssuesViewProps) {
+export function IssuesView({ issues, view, onIssueClick, onCreateIssue, issueForms = [] }: IssuesViewProps) {
   const [tab, setTab] = useState<IssueTab>('all')
   const [filters, setFilters] = useState<FilterState>({
     search: '',
@@ -86,6 +87,24 @@ export function IssuesView({ issues, view, onIssueClick, onCreateIssue }: Issues
   const [showDisplay, setShowDisplay] = useState(false)
   const filterBtn = useRef<HTMLButtonElement>(null)
   const displayBtn = useRef<HTMLButtonElement>(null)
+  const [showNewIssueMenu, setShowNewIssueMenu] = useState(false)
+  const newIssueMenuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!showNewIssueMenu) return
+    const handleClickOutside = (event: MouseEvent) => {
+      if (newIssueMenuRef.current && !newIssueMenuRef.current.contains(event.target as Node)) {
+        setShowNewIssueMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [showNewIssueMenu])
+
+  const createIssueFromMenu = (formId?: string) => {
+    setShowNewIssueMenu(false)
+    onCreateIssue(undefined, formId)
+  }
 
   // Read persisted display options after mount (avoids hydration mismatch);
   // persist on change. IssuesView only mounts once `view` is loaded, so
@@ -258,7 +277,53 @@ export function IssuesView({ issues, view, onIssueClick, onCreateIssue }: Issues
             />
           </div>
 
-          {view.allow_issue_creation && (
+          {view.allow_issue_creation && (issueForms.length > 0 ? (
+            <div className="relative" ref={newIssueMenuRef}>
+              <button
+                onClick={() => setShowNewIssueMenu(v => !v)}
+                className={`flex items-center gap-2 px-2 sm:px-3 py-1.5 text-sm rounded-md transition-colors duration-150 ${
+                  showNewIssueMenu
+                    ? 'bg-accent text-accent-foreground'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+                }`}
+                aria-label="Create issue"
+                aria-haspopup="menu"
+                aria-expanded={showNewIssueMenu}
+              >
+                <Plus className="h-4 w-4" />
+                <span className="hidden sm:inline">New issue</span>
+                <ChevronDown className="h-3 w-3" />
+              </button>
+
+              {showNewIssueMenu && (
+                <div
+                  role="menu"
+                  className="absolute right-0 top-full mt-1 z-50 min-w-[180px] origin-top-right rounded-md border border-border bg-background shadow-md py-1"
+                >
+                  {issueForms.map(form => (
+                    <button
+                      key={form.id}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => createIssueFromMenu(form.id)}
+                      className="w-full px-3 py-1.5 text-sm text-left text-foreground hover:bg-accent transition-colors duration-150"
+                    >
+                      {form.name}
+                    </button>
+                  ))}
+                  <div className="my-1 h-px bg-border" />
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => createIssueFromMenu()}
+                    className="w-full px-3 py-1.5 text-sm text-left text-muted-foreground hover:text-foreground hover:bg-accent transition-colors duration-150"
+                  >
+                    Blank issue
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
             <button
               onClick={() => onCreateIssue()}
               className="flex items-center gap-2 px-2 sm:px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors duration-150"
@@ -267,7 +332,7 @@ export function IssuesView({ issues, view, onIssueClick, onCreateIssue }: Issues
               <Plus className="h-4 w-4" />
               <span className="hidden sm:inline">New issue</span>
             </button>
-          )}
+          ))}
         </div>
       </div>
 

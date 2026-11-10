@@ -7,6 +7,7 @@ import { IssueCreationModal } from '@/components/issue-creation-modal'
 import { IssueDetailView } from '@/components/issue-detail-view'
 import { ProjectUpdatesModal } from '@/components/project-updates-modal'
 import { PublicView } from '@/lib/supabase'
+import type { IssueFormQuestion } from '@/lib/supabase'
 import { LinearIssue } from '@/app/api/linear/issues/route'
 import { RefreshCw, Lock } from 'lucide-react'
 import { useBrandingSettings, applyBrandingToPage, getBrandingStyles } from '@/hooks/use-branding'
@@ -69,6 +70,8 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
   const [showIssueModal, setShowIssueModal] = useState(false)
   const [showProjectUpdates, setShowProjectUpdates] = useState(false)
   const [defaultStateName, setDefaultStateName] = useState<string | undefined>(undefined)
+  const [enabledForms, setEnabledForms] = useState<{ id: string; name: string; questions: IssueFormQuestion[] }[]>([])
+  const [selectedFormQuestions, setSelectedFormQuestions] = useState<IssueFormQuestion[] | undefined>(undefined)
   // Remembers where the list was scrolled when an issue was opened, so we can
   // restore it on return (the list unmounts while the issue view is shown).
   const listScrollY = useRef(0)
@@ -192,8 +195,14 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
     }
   }
 
-  const handleCreateIssue = (columnName?: string) => {
+  const handleCreateIssue = (columnName?: string, formId?: string) => {
     setDefaultStateName(columnName)
+    if (formId) {
+      const form = enabledForms.find(f => f.id === formId)
+      setSelectedFormQuestions(form?.questions)
+    } else {
+      setSelectedFormQuestions(undefined)
+    }
     setShowIssueModal(true)
   }
 
@@ -221,12 +230,11 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
     projectId?: string;
     teamId?: string;
     labelIds: string[];
-    attachmentFiles?: File[];
+    images?: File[];
   }) => {
-    const attachmentFiles = issueData.attachmentFiles ?? []
-    const hasAttachments = attachmentFiles.length > 0
+    const images = issueData.images ?? []
 
-    const response = await fetch(`/api/public-view/${slug}/create-issue`, hasAttachments
+    const response = await fetch(`/api/public-view/${slug}/create-issue`, images.length > 0
       ? {
           method: 'POST',
           body: (() => {
@@ -234,7 +242,7 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
             payload.set('title', issueData.title)
             payload.set('description', issueData.description)
             payload.set('labelIds', JSON.stringify(issueData.labelIds))
-            attachmentFiles.forEach(file => payload.append('attachmentFiles', file))
+            images.forEach(image => payload.append('images', image))
             return payload
           })(),
         }
@@ -268,6 +276,18 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
       loadView()
     }
   }, [slug]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!view?.allow_issue_creation || !view?.enabled_issue_form_ids?.length || !slug) return
+    fetch(`/api/public-view/${slug}/issue-forms`)
+      .then(res => res.json() as Promise<{ success?: boolean; forms?: { id: string; name: string; questions: IssueFormQuestion[] }[] }>)
+      .then((data) => {
+        if (data.success && data.forms) {
+          setEnabledForms(data.forms)
+        }
+      })
+      .catch(console.error)
+  }, [view, slug])
 
   // Apply branding when it loads
   useEffect(() => {
@@ -485,6 +505,7 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
               view={view}
               onIssueClick={handleIssueClick}
               onCreateIssue={handleCreateIssue}
+              issueForms={enabledForms}
             />
           </div>
         )}
@@ -532,6 +553,7 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
         onClose={() => {
           setShowIssueModal(false)
           setDefaultStateName(undefined)
+          setSelectedFormQuestions(undefined)
         }}
         onSubmit={handleSubmitIssue}
         teamName={view?.team_name}
@@ -541,6 +563,8 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
         apiToken="dummy"
         viewSlug={slug}
         defaultStateName={defaultStateName}
+        issueFormQuestions={selectedFormQuestions}
+        allowImageUploads={view?.allow_image_uploads}
       />
 
       {/* Project Updates Modal */}

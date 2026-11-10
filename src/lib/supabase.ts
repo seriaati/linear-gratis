@@ -116,11 +116,14 @@ export type PublicView = {
   show_activity: boolean
   show_project_updates: boolean
   allowed_statuses: string[]
+  hidden_statuses: string[]
   allowed_label_ids: string[]
   password_protected: boolean
   password_hash?: string
   expires_at?: string
   allow_issue_creation: boolean
+  allow_image_uploads: boolean
+  enabled_issue_form_ids: string[]
   created_at: string
   updated_at: string
 }
@@ -269,6 +272,27 @@ export type PublicResource = {
   is_active: boolean
   created_by: string | null
   linear_connection_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type IssueFormQuestion = {
+  id: string
+  type: 'short' | 'long' | 'dropdown'
+  label: string
+  placeholder?: string
+  required: boolean
+  options: string[]
+  order: number
+}
+
+export type IssueForm = {
+  id: string
+  user_id: string
+  created_by: string | null
+  organisation_id: string
+  name: string
+  questions: IssueFormQuestion[]
   created_at: string
   updated_at: string
 }

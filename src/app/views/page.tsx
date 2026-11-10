@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/popover";
 import { Navigation } from "@/components/navigation";
 import { supabase, PublicView } from "@/lib/supabase";
+import type { IssueForm } from "@/lib/supabase";
 import { getActiveOrganisationId } from "@/lib/organisations";
 import { cn } from "@/lib/utils";
 import { useRouter } from "next/navigation";
@@ -174,6 +175,11 @@ export default function PublicViewsPage() {
   const [editingView, setEditingView] = useState<PublicView | null>(null);
   const [showEditView, setShowEditView] = useState(false);
   const [allowIssueCreation, setAllowIssueCreation] = useState(false);
+  const [allowImageUploads, setAllowImageUploads] = useState(false);
+  const [availableStatuses, setAvailableStatuses] = useState<{ id: string; name: string; color: string; type: string }[]>([]);
+  const [hiddenStatuses, setHiddenStatuses] = useState<string[]>([]);
+  const [issueForms, setIssueForms] = useState<IssueForm[]>([]);
+  const [enabledIssueFormIds, setEnabledIssueFormIds] = useState<string[]>([]);
   const [showComments, setShowComments] = useState(false);
   const [showActivity, setShowActivity] = useState(false);
   const [showProjectUpdates, setShowProjectUpdates] = useState(true);
@@ -241,6 +247,8 @@ export default function PublicViewsPage() {
   const resetSourceScopedSelections = useCallback(() => {
     setAllowedLabelIds([]);
     setAvailableLabels([]);
+    setHiddenStatuses([]);
+    setAvailableStatuses([]);
     setExcludedIssueIds([]);
     setAvailableIssues([]);
     setIssueFilter("");
@@ -282,15 +290,23 @@ export default function PublicViewsPage() {
 
     setLoading(true);
     try {
-      // Load token status and views in parallel. The token itself never
-      // leaves the server - we only learn whether one is configured.
-      const [tokenStatusResponse, viewsResult] = await Promise.all([
+      // Load token status, views and issue forms in parallel. The token itself
+      // never leaves the server - we only learn whether one is configured.
+      const { data: { session } } = await supabase.auth.getSession();
+      const [tokenStatusResponse, viewsResult, issueFormsResult] = await Promise.all([
         fetch("/api/profile/linear-token", { method: "GET" }),
         supabase
           .from("public_views")
           .select("*")
           .order("created_at", { ascending: false }),
+        fetch("/api/issue-forms", {
+          headers: { Authorization: `Bearer ${session?.access_token}` },
+        }).then((r) => r.json() as Promise<{ success?: boolean; issueForms?: IssueForm[] }>),
       ]);
+
+      if (issueFormsResult.success && issueFormsResult.issueForms) {
+        setIssueForms(issueFormsResult.issueForms);
+      }
 
       const orgId = await getActiveOrganisationId(supabase, user.id);
       setActiveOrgId(orgId);
@@ -459,6 +475,9 @@ export default function PublicViewsPage() {
         password_hash: passwordHash,
         is_active: true,
         allow_issue_creation: allowIssueCreation,
+        allow_image_uploads: allowImageUploads,
+        enabled_issue_form_ids: enabledIssueFormIds,
+        hidden_statuses: hiddenStatuses,
         show_comments: showComments,
         show_activity: showActivity,
         show_project_updates: showProjectUpdates,
@@ -546,6 +565,10 @@ export default function PublicViewsPage() {
     setPasswordProtected(false);
     setPassword("");
     setAllowIssueCreation(false);
+    setAllowImageUploads(false);
+    setHiddenStatuses([]);
+    setAvailableStatuses([]);
+    setEnabledIssueFormIds([]);
     setShowComments(false);
     setShowActivity(false);
     setShowProjectUpdates(true);
@@ -564,6 +587,7 @@ export default function PublicViewsPage() {
     async (sourceProjectId?: string, sourceTeamId?: string) => {
       if (!hasLinearToken || (!sourceProjectId && !sourceTeamId)) {
         setAvailableLabels([]);
+        setAvailableStatuses([]);
         return;
       }
 
@@ -580,16 +604,22 @@ export default function PublicViewsPage() {
 
         if (response.ok) {
           const data = (await response.json()) as {
-            metadata?: { labels?: LinearLabel[] };
+            metadata?: {
+              labels?: LinearLabel[];
+              states?: { id: string; name: string; color: string; type: string }[];
+            };
           };
           const labels = data.metadata?.labels ?? [];
           setAvailableLabels(labels);
+          setAvailableStatuses(data.metadata?.states ?? []);
         } else {
           setAvailableLabels([]);
+          setAvailableStatuses([]);
         }
       } catch (error) {
         console.error("Failed to fetch labels for view filter:", error);
         setAvailableLabels([]);
+        setAvailableStatuses([]);
       } finally {
         setLoadingLabels(false);
       }
@@ -635,6 +665,7 @@ export default function PublicViewsPage() {
 
     if (!sourceProjectId && !sourceTeamId) {
       setAvailableLabels([]);
+      setAvailableStatuses([]);
       setLoadingLabels(false);
       if (showEditView) {
         setAvailableIssues([]);
@@ -666,6 +697,9 @@ export default function PublicViewsPage() {
     setPasswordProtected(view.password_protected || false);
     setPassword("");
     setAllowIssueCreation(view.allow_issue_creation || false);
+    setAllowImageUploads(view.allow_image_uploads || false);
+    setHiddenStatuses(view.hidden_statuses ?? []);
+    setEnabledIssueFormIds(view.enabled_issue_form_ids ?? []);
     setShowComments(view.show_comments ?? false);
     setShowActivity(view.show_activity ?? false);
     setShowProjectUpdates(view.show_project_updates ?? true);
@@ -755,6 +789,9 @@ export default function PublicViewsPage() {
           password_protected: passwordProtected,
           password_hash: passwordHash,
           allow_issue_creation: allowIssueCreation,
+          allow_image_uploads: allowImageUploads,
+          enabled_issue_form_ids: enabledIssueFormIds,
+          hidden_statuses: hiddenStatuses,
           show_comments: showComments,
           show_activity: showActivity,
           show_project_updates: showProjectUpdates,
@@ -785,6 +822,123 @@ export default function PublicViewsPage() {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const renderHiddenStatusesSection = () => {
+    if (availableStatuses.length === 0) return null;
+
+    return (
+      <div className="space-y-2">
+        <Label>Hide statuses from public view</Label>
+        <p className="text-xs text-muted-foreground">
+          Issues with these statuses will not appear in the public view
+        </p>
+        <div className="flex flex-wrap gap-2 pt-1">
+          {availableStatuses.map((status) => {
+            const isHidden = hiddenStatuses.includes(status.name);
+            return (
+              <button
+                key={status.id}
+                type="button"
+                onClick={() =>
+                  setHiddenStatuses((prev) =>
+                    isHidden
+                      ? prev.filter((s) => s !== status.name)
+                      : [...prev, status.name]
+                  )
+                }
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                  isHidden
+                    ? "border-destructive/50 bg-destructive/10 text-destructive line-through"
+                    : "border-border bg-background text-foreground hover:bg-accent"
+                }`}
+              >
+                <span
+                  className="w-2 h-2 rounded-full flex-shrink-0"
+                  style={{ backgroundColor: status.color }}
+                />
+                {status.name}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  const renderImageUploadOption = () => {
+    if (!allowIssueCreation) return null;
+
+    return (
+      <div className="flex items-start space-x-3">
+        <div className="flex-shrink-0 mt-0.5">
+          <Checkbox
+            checked={allowImageUploads}
+            onChange={() => setAllowImageUploads(!allowImageUploads)}
+          />
+        </div>
+        <div className="flex-1">
+          <Label className="text-sm font-medium cursor-pointer">
+            Allow image uploads
+          </Label>
+          <p className="text-xs text-muted-foreground mt-1">
+            Let viewers attach up to 5 images to new issues. Images are stored at public URLs so they show in Linear and synced GitHub issues.
+          </p>
+        </div>
+      </div>
+    );
+  };
+
+  const renderIssueFormsSection = () => {
+    if (!allowIssueCreation) return null;
+
+    return (
+      <div className="space-y-4">
+        <h3 className="font-semibold text-lg flex items-center gap-2">
+          <div className="w-6 h-6 bg-primary text-primary-foreground rounded-full flex items-center justify-center text-sm font-bold">
+            5
+          </div>
+          Issue forms (optional)
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          Select which issue forms viewers can choose from when creating an issue. If none are selected, a blank issue form is shown.
+        </p>
+        {issueForms.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No issue forms created yet.{" "}
+            <Link href="/issue-forms" className="text-primary hover:underline">
+              Create your first issue form
+            </Link>
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {issueForms.map((form) => {
+              const isEnabled = enabledIssueFormIds.includes(form.id);
+              return (
+                <div key={form.id} className="flex items-center space-x-3">
+                  <Checkbox
+                    checked={isEnabled}
+                    onChange={() =>
+                      setEnabledIssueFormIds((prev) =>
+                        isEnabled
+                          ? prev.filter((id) => id !== form.id)
+                          : [...prev, form.id]
+                      )
+                    }
+                  />
+                  <Label className="text-sm font-normal cursor-pointer">
+                    {form.name}
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {form.questions.length} question{form.questions.length !== 1 ? "s" : ""}
+                    </span>
+                  </Label>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
   };
 
   const renderIncludedLabelsSection = () => {
@@ -1082,6 +1236,7 @@ export default function PublicViewsPage() {
                     </div>
                   )}
                   {renderIncludedLabelsSection()}
+                  {renderHiddenStatusesSection()}
                 </div>
               </div>
 
@@ -1154,6 +1309,7 @@ export default function PublicViewsPage() {
                       </p>
                     </div>
                   </div>
+                  {renderImageUploadOption()}
                   <div className="flex items-start space-x-3">
                     <div className="flex-shrink-0 mt-0.5">
                       <Checkbox
@@ -1205,11 +1361,13 @@ export default function PublicViewsPage() {
                 </div>
               </div>
 
+              {renderIssueFormsSection()}
+
               {/* Step 5: Security Options */}
               <div className="space-y-4">
                 <h3 className="font-semibold text-lg flex items-center gap-2">
                   <div className="w-6 h-6 bg-primary text-primary-foreground rounded-full flex items-center justify-center text-sm font-bold">
-                    5
+                    {allowIssueCreation ? "6" : "5"}
                   </div>
                   Security options
                 </h3>
@@ -1375,6 +1533,7 @@ export default function PublicViewsPage() {
                     </div>
                   )}
                   {renderIncludedLabelsSection()}
+                  {renderHiddenStatusesSection()}
                 </div>
               </div>
 
@@ -1440,6 +1599,7 @@ export default function PublicViewsPage() {
                       </p>
                     </div>
                   </div>
+                  {renderImageUploadOption()}
                   <div className="flex items-start space-x-3">
                     <div className="flex-shrink-0 mt-0.5">
                       <Checkbox
@@ -1491,11 +1651,13 @@ export default function PublicViewsPage() {
                 </div>
               </div>
 
+              {renderIssueFormsSection()}
+
               {/* Security Options */}
               <div className="space-y-4">
                 <h3 className="font-semibold text-lg flex items-center gap-2">
                   <div className="w-6 h-6 bg-primary text-primary-foreground rounded-full flex items-center justify-center text-sm font-bold">
-                    5
+                    {allowIssueCreation ? "6" : "5"}
                   </div>
                   Security options
                 </h3>
