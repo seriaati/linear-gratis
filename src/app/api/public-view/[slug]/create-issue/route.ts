@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
 import { decryptToken } from '@/lib/encryption';
+import {
+  ISSUE_IMAGES_BUCKET,
+  ISSUE_IMAGE_EXTENSIONS,
+  validateIssueImages,
+} from '@/lib/issue-images';
 
 const LINEAR_API_URL = 'https://api.linear.app/graphql';
 
@@ -158,7 +163,13 @@ export async function POST(
 ) {
   try {
     const { slug } = await params;
-    const issueData: IssueCreateRequest = await request.json();
+    const formData = await request.formData();
+    const payload = formData.get('payload');
+    if (typeof payload !== 'string') {
+      return NextResponse.json({ error: 'Missing issue data' }, { status: 400 });
+    }
+    const issueData: IssueCreateRequest = JSON.parse(payload);
+    const images = formData.getAll('images').filter((value): value is File => value instanceof File);
 
     // Get the public view
     const { data: viewData, error: viewError } = await supabaseAdmin
@@ -180,6 +191,19 @@ export async function POST(
         { error: 'Issue creation is not allowed for this view' },
         { status: 403 }
       );
+    }
+
+    if (images.length > 0) {
+      if (!viewData.allow_image_uploads) {
+        return NextResponse.json(
+          { error: 'Image uploads are not allowed for this view' },
+          { status: 403 }
+        );
+      }
+      const imageError = validateIssueImages(images);
+      if (imageError) {
+        return NextResponse.json({ error: imageError }, { status: 400 });
+      }
     }
 
     if (!viewData.team_id) {
@@ -229,37 +253,66 @@ export async function POST(
       }
     }
 
-    // Create the issue with enforced restrictions
-    // Note: priority and assigneeId are intentionally not passed for public views
-    const result = await createLinearIssue(decryptedToken, {
-      title: issueData.title,
-      description: issueData.description,
-      stateId: finalStateId, // Enforced triage/unstarted state
-      priority: 0, // Default to no priority for public views
-      projectId: viewData.project_id,
-      teamId: viewData.team_id,
-      labelIds: issueData.labelIds,
-    });
+    const uploadedPaths: string[] = [];
+    let issueCreated = false;
+    try {
+      const imageMarkdown: string[] = [];
+      // Sequential so every successful upload is recorded before a later failure triggers cleanup
+      for (const image of images) {
+        const path = `${viewData.id}/${crypto.randomUUID()}.${ISSUE_IMAGE_EXTENSIONS[image.type]}`;
+        const { error: uploadError } = await supabaseAdmin.storage
+          .from(ISSUE_IMAGES_BUCKET)
+          .upload(path, image, { contentType: image.type, upsert: false });
+        if (uploadError) {
+          throw uploadError;
+        }
+        uploadedPaths.push(path);
+        const { data: urlData } = supabaseAdmin.storage.from(ISSUE_IMAGES_BUCKET).getPublicUrl(path);
+        imageMarkdown.push(`![${image.name.replace(/[[\]]/g, '')}](${urlData.publicUrl})`);
+      }
 
-    if (result.errors) {
-      console.error('Linear API errors:', result.errors);
-      return NextResponse.json(
-        { error: 'Failed to create issue', details: result.errors },
-        { status: 400 }
-      );
+      // Create the issue with enforced restrictions
+      // Note: priority and assigneeId are intentionally not passed for public views
+      const result = await createLinearIssue(decryptedToken, {
+        title: issueData.title,
+        description: [issueData.description, ...imageMarkdown].filter(Boolean).join('\n\n'),
+        stateId: finalStateId, // Enforced triage/unstarted state
+        priority: 0, // Default to no priority for public views
+        projectId: viewData.project_id,
+        teamId: viewData.team_id,
+        labelIds: issueData.labelIds,
+      });
+
+      if (result.errors) {
+        console.error('Linear API errors:', result.errors);
+        return NextResponse.json(
+          { error: 'Failed to create issue', details: result.errors },
+          { status: 400 }
+        );
+      }
+
+      if (!result.data?.issueCreate?.success) {
+        return NextResponse.json(
+          { error: 'Failed to create issue' },
+          { status: 400 }
+        );
+      }
+
+      issueCreated = true;
+      return NextResponse.json({
+        success: true,
+        issue: result.data.issueCreate.issue,
+      });
+    } finally {
+      if (!issueCreated && uploadedPaths.length > 0) {
+        const { error: removeError } = await supabaseAdmin.storage
+          .from(ISSUE_IMAGES_BUCKET)
+          .remove(uploadedPaths);
+        if (removeError) {
+          console.error('Failed to clean up uploaded images:', removeError);
+        }
+      }
     }
-
-    if (!result.data?.issueCreate?.success) {
-      return NextResponse.json(
-        { error: 'Failed to create issue' },
-        { status: 400 }
-      );
-    }
-
-    return NextResponse.json({
-      success: true,
-      issue: result.data.issueCreate.issue,
-    });
 
   } catch (error) {
     console.error('Error creating issue:', error);

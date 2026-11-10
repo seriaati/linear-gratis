@@ -174,20 +174,22 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
     projectId?: string;
     teamId?: string;
     labelIds: string[];
+    images?: File[];
   }) => {
+    const body = new FormData()
+    body.append('payload', JSON.stringify({
+      title: issueData.title,
+      description: issueData.description,
+      stateId: issueData.stateId,
+      priority: issueData.priority,
+      assigneeId: issueData.assigneeId,
+      labelIds: issueData.labelIds,
+    }))
+    issueData.images?.forEach(image => body.append('images', image))
+
     const response = await fetch(`/api/public-view/${slug}/create-issue`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        title: issueData.title,
-        description: issueData.description,
-        stateId: issueData.stateId,
-        priority: issueData.priority,
-        assigneeId: issueData.assigneeId,
-        labelIds: issueData.labelIds,
-      }),
+      body,
     })
 
     const result = await response.json() as { success?: boolean; issue?: unknown; error?: string }
@@ -621,6 +623,7 @@ export default function PublicViewPage({ params }: PublicViewPageProps) {
         viewSlug={slug}
         defaultStateName={defaultStateName}
         issueFormQuestions={selectedFormQuestions}
+        allowImageUploads={view?.allow_image_uploads}
       />
 
       {/* Issue Detail Modal */}

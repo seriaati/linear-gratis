@@ -3,7 +3,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import Image from 'next/image'
 import { Button } from '@/components/ui/button'
-import { X, Maximize2, ChevronDown } from 'lucide-react'
+import { X, Maximize2, ChevronDown, Paperclip } from 'lucide-react'
+import { MAX_ISSUE_IMAGES, ISSUE_IMAGE_TYPES, validateIssueImages } from '@/lib/issue-images'
 
 interface IssueFormQuestion {
   id: string
@@ -27,6 +28,7 @@ interface IssueCreationModalProps {
   viewSlug?: string
   defaultStateName?: string
   issueFormQuestions?: IssueFormQuestion[]
+  allowImageUploads?: boolean
 }
 
 interface IssueFormData {
@@ -38,6 +40,7 @@ interface IssueFormData {
   projectId?: string
   teamId?: string
   labelIds: string[]
+  images?: File[]
 }
 
 interface WorkflowState {
@@ -70,6 +73,11 @@ interface Metadata {
   labels: Label[]
   triageEnabled?: boolean
   triageIssueState?: WorkflowState
+}
+
+interface PendingImage {
+  file: File
+  previewUrl: string
 }
 
 const priorities = [
@@ -150,6 +158,7 @@ export function IssueCreationModal({
   viewSlug,
   defaultStateName,
   issueFormQuestions,
+  allowImageUploads,
 }: IssueCreationModalProps) {
   const [formData, setFormData] = useState<IssueFormData>({
     title: '',
@@ -172,6 +181,8 @@ export function IssueCreationModal({
   const [showLabelsDropdown, setShowLabelsDropdown] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({})
+  const [images, setImages] = useState<PendingImage[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const titleRef = useRef<HTMLDivElement>(null)
   const descriptionRef = useRef<HTMLDivElement>(null)
@@ -190,6 +201,10 @@ export function IssueCreationModal({
       setFormData(prev => ({ ...prev, title: '', description: '' }))
       if (titleRef.current) titleRef.current.textContent = ''
       if (descriptionRef.current) descriptionRef.current.textContent = ''
+      setImages(prev => {
+        prev.forEach(image => URL.revokeObjectURL(image.previewUrl))
+        return []
+      })
     }
   }, [isOpen, issueFormQuestions])
 
@@ -269,6 +284,38 @@ export function IssueCreationModal({
     }
   }, [isOpen, viewSlug, loadMetadata])
 
+  const addImages = (files: File[]) => {
+    const validationError = validateIssueImages([...images.map(image => image.file), ...files])
+    if (validationError) {
+      setError(validationError)
+      return
+    }
+    setError(null)
+    setImages(prev => [
+      ...prev,
+      ...files.map(file => ({ file, previewUrl: URL.createObjectURL(file) })),
+    ])
+  }
+
+  const removeImage = (index: number) => {
+    URL.revokeObjectURL(images[index].previewUrl)
+    setImages(prev => prev.filter((_, i) => i !== index))
+  }
+
+  const handlePaste = (e: React.ClipboardEvent) => {
+    if (!allowImageUploads) return
+    const files = Array.from(e.clipboardData.files).filter(file => file.type.startsWith('image/'))
+    if (files.length === 0) return
+    e.preventDefault()
+    addImages(files)
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    if (!allowImageUploads) return
+    e.preventDefault()
+    addImages(Array.from(e.dataTransfer.files))
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
@@ -316,6 +363,7 @@ export function IssueCreationModal({
         stateId: selectedState?.id,
         assigneeId: selectedAssignee?.id,
         labelIds: selectedLabels.map(label => label.id),
+        images: images.map(image => image.file),
       }
       await onSubmit(submitData)
       onClose()
@@ -368,7 +416,14 @@ export function IssueCreationModal({
         }}
       >
         <div style={{ minHeight: '100px', width: '100%' }}>
-          <form onSubmit={handleSubmit} className="w-full" tabIndex={-1}>
+          <form
+            onSubmit={handleSubmit}
+            onPaste={handlePaste}
+            onDragOver={allowImageUploads ? e => e.preventDefault() : undefined}
+            onDrop={handleDrop}
+            className="w-full"
+            tabIndex={-1}
+          >
             {/* Toolbar */}
             <div className="flex items-center justify-between p-3 border-b" style={{ borderColor: 'lch(24.833 4.707 272)' }}>
               <div className="flex items-center gap-2">
@@ -519,6 +574,30 @@ export function IssueCreationModal({
                     data-placeholder="Add description…"
                     onFocus={() => setError(null)}
                   />
+                </div>
+              )}
+
+              {images.length > 0 && (
+                <div className="flex flex-wrap gap-2 px-3 pt-2">
+                  {images.map((image, index) => (
+                    <div
+                      key={image.previewUrl}
+                      className="relative w-16 h-16 rounded overflow-hidden group"
+                      style={{ border: '0.5px solid lch(24.833 4.707 272)' }}
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={image.previewUrl} alt={image.file.name} className="w-full h-full object-cover" />
+                      <button
+                        type="button"
+                        onClick={() => removeImage(index)}
+                        className="absolute top-0.5 right-0.5 p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                        style={{ backgroundColor: 'lch(10.633 1.867 272 / 0.85)' }}
+                        aria-label={`Remove ${image.file.name}`}
+                      >
+                        <X className="w-3 h-3" style={{ color: 'lch(91.223 1.933 272)' }} />
+                      </button>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -812,7 +891,34 @@ export function IssueCreationModal({
             </div>
 
             {/* Footer */}
-            <div className="flex items-center justify-end px-4 py-3 border-t" style={{ borderColor: 'lch(24.833 4.707 272)' }}>
+            <div className="flex items-center justify-between px-4 py-3 border-t" style={{ borderColor: 'lch(24.833 4.707 272)' }}>
+              <div>
+                {allowImageUploads && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={images.length >= MAX_ISSUE_IMAGES || isSubmitting}
+                      className="p-2 hover:bg-accent rounded transition-colors disabled:opacity-50 disabled:pointer-events-none"
+                      aria-label="Attach images"
+                      title={`Attach images (up to ${MAX_ISSUE_IMAGES})`}
+                    >
+                      <Paperclip className="w-4 h-4" style={{ color: 'lch(64.892% 1.933 272 / 1)' }} />
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept={ISSUE_IMAGE_TYPES.join(',')}
+                      multiple
+                      className="hidden"
+                      onChange={e => {
+                        addImages(Array.from(e.target.files ?? []))
+                        e.target.value = ''
+                      }}
+                    />
+                  </>
+                )}
+              </div>
               <Button
                 type="submit"
                 disabled={!formData.title.trim() || isSubmitting}
