@@ -100,6 +100,7 @@ export async function GET(
         show_priorities: viewData.show_priorities,
         show_descriptions: viewData.show_descriptions,
         allow_issue_creation: viewData.allow_issue_creation,
+        allow_image_uploads: viewData.allow_image_uploads,
         enabled_issue_form_ids: viewData.enabled_issue_form_ids ?? [],
         created_at: viewData.created_at
       },
@@ -228,6 +229,7 @@ export async function POST(
         show_descriptions: viewData.show_descriptions,
         password_protected: viewData.password_protected,
         allow_issue_creation: viewData.allow_issue_creation,
+        allow_image_uploads: viewData.allow_image_uploads,
         enabled_issue_form_ids: viewData.enabled_issue_form_ids ?? [],
         created_at: viewData.created_at
       },

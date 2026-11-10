@@ -71,6 +71,7 @@ export default function PublicViewsPage() {
   const [editingView, setEditingView] = useState<PublicView | null>(null);
   const [showEditView, setShowEditView] = useState(false);
   const [allowIssueCreation, setAllowIssueCreation] = useState(false);
+  const [allowImageUploads, setAllowImageUploads] = useState(false);
   const [availableStatuses, setAvailableStatuses] = useState<{ id: string; name: string; color: string; type: string }[]>([]);
   const [hiddenStatuses, setHiddenStatuses] = useState<string[]>([]);
   const [issueForms, setIssueForms] = useState<IssueForm[]>([]);
@@ -282,6 +283,7 @@ export default function PublicViewsPage() {
         password_hash: passwordHash,
         is_active: true,
         allow_issue_creation: allowIssueCreation,
+        allow_image_uploads: allowImageUploads,
         enabled_issue_form_ids: enabledIssueFormIds,
         ...sourceData,
       });
@@ -374,6 +376,7 @@ export default function PublicViewsPage() {
     setPasswordProtected(false);
     setPassword("");
     setAllowIssueCreation(false);
+    setAllowImageUploads(false);
     setHiddenStatuses([]);
     setAvailableStatuses([]);
     setEnabledIssueFormIds([]);
@@ -391,6 +394,7 @@ export default function PublicViewsPage() {
     setPasswordProtected(view.password_protected || false);
     setPassword("");
     setAllowIssueCreation(view.allow_issue_creation || false);
+    setAllowImageUploads(view.allow_image_uploads || false);
     setHiddenStatuses(view.hidden_statuses ?? []);
     setEnabledIssueFormIds(view.enabled_issue_form_ids ?? []);
 
@@ -477,6 +481,7 @@ export default function PublicViewsPage() {
           password_protected: passwordProtected,
           password_hash: passwordHash,
           allow_issue_creation: allowIssueCreation,
+          allow_image_uploads: allowImageUploads,
           enabled_issue_form_ids: enabledIssueFormIds,
           hidden_statuses: hiddenStatuses,
           ...sourceData,
@@ -860,6 +865,24 @@ export default function PublicViewsPage() {
                       </p>
                     </div>
                   </div>
+                  {allowIssueCreation && (
+                    <div className="flex items-start space-x-3">
+                      <div className="flex-shrink-0 mt-0.5">
+                        <Checkbox
+                          checked={allowImageUploads}
+                          onChange={() => setAllowImageUploads(!allowImageUploads)}
+                        />
+                      </div>
+                      <div className="flex-1">
+                        <Label className="text-sm font-medium cursor-pointer">
+                          Allow image uploads
+                        </Label>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Let viewers attach up to 5 images to new issues. Images are stored at public URLs so they show in Linear and synced GitHub issues.
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1199,6 +1222,24 @@ export default function PublicViewsPage() {
                       </p>
                     </div>
                   </div>
+                  {allowIssueCreation && (
+                    <div className="flex items-start space-x-3">
+                      <div className="flex-shrink-0 mt-0.5">
+                        <Checkbox
+                          checked={allowImageUploads}
+                          onChange={() => setAllowImageUploads(!allowImageUploads)}
+                        />
+                      </div>
+                      <div className="flex-1">
+                        <Label className="text-sm font-medium cursor-pointer">
+                          Allow image uploads
+                        </Label>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Let viewers attach up to 5 images to new issues. Images are stored at public URLs so they show in Linear and synced GitHub issues.
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
