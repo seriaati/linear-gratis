@@ -33,25 +33,10 @@ type Project = {
   description?: string;
 };
 
-type LinearIssueTemplate = {
-  id: string;
-  name: string;
-  description: string | null;
-  team: {
-    id: string;
-    name: string;
-    key?: string | null;
-  } | null;
-};
-
-const NO_TEMPLATE_VALUE = "__no_template__";
-
 type FormDraft = {
   name: string;
   slug: string;
   selectedProject: string;
-  selectedTemplate: string;
-  allowTemplateSelection: boolean;
   title: string;
   description: string;
 };
@@ -61,9 +46,7 @@ export default function FormsPage() {
   const router = useRouter();
   const [forms, setForms] = useState<CustomerRequestForm[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [templates, setTemplates] = useState<LinearIssueTemplate[]>([]);
   const [loading, setLoading] = useState(true);
-  const [loadingTemplates, setLoadingTemplates] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [hasLinearToken, setHasLinearToken] = useState(false);
@@ -80,14 +63,10 @@ export default function FormsPage() {
   const [formName, setFormName] = useState("");
   const [formSlug, setFormSlug] = useState("");
   const [selectedProject, setSelectedProject] = useState("");
-  const [selectedTemplate, setSelectedTemplate] = useState("");
-  const [allowTemplateSelection, setAllowTemplateSelection] = useState(false);
   const [formTitle, setFormTitle] = useState("");
   const [formDescription, setFormDescription] = useState("");
   const [editingFormId, setEditingFormId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<FormDraft | null>(null);
-  const [editTemplates, setEditTemplates] = useState<LinearIssueTemplate[]>([]);
-  const [loadingEditTemplates, setLoadingEditTemplates] = useState(false);
   const [savingFormId, setSavingFormId] = useState<string | null>(null);
 
   const fetchProjects = useCallback(async () => {
@@ -105,30 +84,6 @@ export default function FormsPage() {
     } catch (error) {
       console.error("Failed to fetch projects:", error);
     }
-  }, []);
-
-  const fetchTemplateOptions = useCallback(async (projectId: string) => {
-    if (!projectId) return [];
-
-    try {
-      const response = await fetch("/api/linear/templates", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId }),
-      });
-
-      if (response.ok) {
-        const data = (await response.json()) as {
-          success?: boolean;
-          templates?: LinearIssueTemplate[];
-        };
-        return data.templates || [];
-      }
-    } catch (error) {
-      console.error("Failed to fetch templates:", error);
-    }
-
-    return [];
   }, []);
 
   const loadUserData = useCallback(async () => {
@@ -184,32 +139,6 @@ export default function FormsPage() {
     loadUserData();
   }, [user, authLoading, router, loadUserData]);
 
-  const fetchTemplatesForProject = useCallback(async (projectId: string) => {
-    if (!projectId) {
-      setTemplates([]);
-      return;
-    }
-
-    setLoadingTemplates(true);
-    try {
-      setTemplates(await fetchTemplateOptions(projectId));
-    } finally {
-      setLoadingTemplates(false);
-    }
-  }, [fetchTemplateOptions]);
-
-  useEffect(() => {
-    setSelectedTemplate("");
-    setAllowTemplateSelection(false);
-
-    if (!selectedProject || !hasLinearToken) {
-      setTemplates([]);
-      return;
-    }
-
-    fetchTemplatesForProject(selectedProject);
-  }, [fetchTemplatesForProject, hasLinearToken, selectedProject]);
-
   const generateSlug = (name: string) => {
     return name
       .toLowerCase()
@@ -230,7 +159,7 @@ export default function FormsPage() {
     setEditDraft((current) => (current ? { ...current, ...patch } : current));
   };
 
-  const startEditingForm = async (form: CustomerRequestForm) => {
+  const startEditingForm = (form: CustomerRequestForm) => {
     const projectId = form.linear_project_id || form.project_id || "";
 
     setShowCreateForm(false);
@@ -240,48 +169,18 @@ export default function FormsPage() {
       name: form.name,
       slug: form.slug,
       selectedProject: projectId,
-      selectedTemplate: form.linear_template_id || "",
-      allowTemplateSelection: Boolean(
-        form.linear_template_id && form.allow_template_selection,
-      ),
       title: form.form_title,
       description: form.description || "",
     });
-
-    setEditTemplates([]);
-    if (!hasLinearToken || !projectId) return;
-
-    setLoadingEditTemplates(true);
-    try {
-      setEditTemplates(await fetchTemplateOptions(projectId));
-    } finally {
-      setLoadingEditTemplates(false);
-    }
   };
 
   const cancelEditingForm = () => {
     setEditingFormId(null);
     setEditDraft(null);
-    setEditTemplates([]);
-    setLoadingEditTemplates(false);
   };
 
-  const handleEditProjectChange = async (projectId: string) => {
-    updateEditDraft({
-      selectedProject: projectId,
-      selectedTemplate: "",
-      allowTemplateSelection: false,
-    });
-    setEditTemplates([]);
-
-    if (!hasLinearToken || !projectId) return;
-
-    setLoadingEditTemplates(true);
-    try {
-      setEditTemplates(await fetchTemplateOptions(projectId));
-    } finally {
-      setLoadingEditTemplates(false);
-    }
+  const handleEditProjectChange = (projectId: string) => {
+    updateEditDraft({ selectedProject: projectId });
   };
 
   const saveForm = async () => {
@@ -295,16 +194,6 @@ export default function FormsPage() {
       selectedProjectData?.name ||
       existingForm?.linear_project_name ||
       existingForm?.project_name;
-    const selectedTemplateData = editTemplates.find(
-      (template) => template.id === editDraft.selectedTemplate,
-    );
-    const existingTemplateName =
-      existingForm?.linear_template_id === editDraft.selectedTemplate
-        ? existingForm.linear_template_name
-        : null;
-    const templateName = editDraft.selectedTemplate
-      ? selectedTemplateData?.name || existingTemplateName || null
-      : null;
 
     if (!editDraft.selectedProject || !projectName) {
       setMessage({ type: "error", text: "Please select a project" });
@@ -324,11 +213,6 @@ export default function FormsPage() {
           linear_project_id: editDraft.selectedProject,
           project_name: projectName,
           linear_project_name: projectName,
-          linear_template_id: editDraft.selectedTemplate || null,
-          linear_template_name: templateName,
-          allow_template_selection: Boolean(
-            editDraft.selectedTemplate && editDraft.allowTemplateSelection,
-          ),
           form_title: editDraft.title,
           description: editDraft.description || null,
         })
@@ -375,9 +259,6 @@ export default function FormsPage() {
       const selectedProjectData = projects.find(
         (p) => p.id === selectedProject,
       );
-      const selectedTemplateData = templates.find(
-        (template) => template.id === selectedTemplate,
-      );
       if (!selectedProjectData) {
         setMessage({ type: "error", text: "Please select a project" });
         return;
@@ -411,9 +292,6 @@ export default function FormsPage() {
         linear_project_id: selectedProject,
         project_name: selectedProjectData.name,
         linear_project_name: selectedProjectData.name,
-        linear_template_id: selectedTemplate || null,
-        linear_template_name: selectedTemplateData?.name ?? null,
-        allow_template_selection: Boolean(selectedTemplate && allowTemplateSelection),
         form_title: formTitle,
         description: formDescription || null,
       });
@@ -529,9 +407,6 @@ export default function FormsPage() {
     setFormName("");
     setFormSlug("");
     setSelectedProject("");
-    setSelectedTemplate("");
-    setAllowTemplateSelection(false);
-    setTemplates([]);
     setFormTitle("");
     setFormDescription("");
     setShowCreateForm(false);
@@ -735,62 +610,6 @@ export default function FormsPage() {
                     selected project
                   </p>
                 </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="template">Default issue template</Label>
-                  <Select
-                    value={selectedTemplate || NO_TEMPLATE_VALUE}
-                    onValueChange={(value) => {
-                      const nextTemplate = value === NO_TEMPLATE_VALUE ? "" : value;
-                      setSelectedTemplate(nextTemplate);
-                      if (!nextTemplate) setAllowTemplateSelection(false);
-                    }}
-                    disabled={!selectedProject || loadingTemplates || templates.length === 0}
-                  >
-                    <SelectTrigger id="template" className="w-full">
-                      <SelectValue
-                        placeholder={
-                          loadingTemplates
-                            ? "Loading templates..."
-                            : "Choose a default issue template"
-                        }
-                      />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={NO_TEMPLATE_VALUE}>No template</SelectItem>
-                      {templates.map((template) => (
-                        <SelectItem key={template.id} value={template.id}>
-                          {template.team ? `${template.team.name} · ${template.name}` : template.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    {selectedProject
-                      ? templates.length === 0 && !loadingTemplates
-                        ? "No issue templates are available for this project."
-                        : "The selected template will be applied when a submission creates a Linear issue."
-                      : "Select a project to load compatible issue templates."}
-                  </p>
-                </div>
-
-                <label className="flex items-start gap-3 rounded-md border border-border/60 p-3 text-sm">
-                  <input
-                    type="checkbox"
-                    className="mt-0.5 h-4 w-4"
-                    checked={allowTemplateSelection}
-                    disabled={!selectedTemplate}
-                    onChange={(event) => setAllowTemplateSelection(event.target.checked)}
-                  />
-                  <span>
-                    <span className="block font-medium">
-                      Let submitters change the template
-                    </span>
-                    <span className="block text-xs text-muted-foreground">
-                      When enabled, the public form will show compatible issue templates with your default preselected.
-                    </span>
-                  </span>
-                </label>
               </div>
 
               {/* Step 3: Customer Experience */}
@@ -912,20 +731,6 @@ export default function FormsPage() {
                         },
                         ...projects,
                       ].filter((project) => project.id);
-                  const templateOptions = editTemplates.some(
-                    (template) => template.id === draft.selectedTemplate,
-                  )
-                    ? editTemplates
-                    : [
-                        {
-                          id: draft.selectedTemplate,
-                          name: form.linear_template_name || "Current template",
-                          description: null,
-                          team: null,
-                        },
-                        ...editTemplates,
-                      ].filter((template) => template.id);
-
                   return (
                     <Card
                       key={form.id}
@@ -996,81 +801,7 @@ export default function FormsPage() {
                               </SelectContent>
                             </Select>
                           </div>
-
-                          <div className="space-y-2">
-                            <Label htmlFor={`edit-template-${form.id}`}>
-                              Default issue template
-                            </Label>
-                            <Select
-                              value={draft.selectedTemplate || NO_TEMPLATE_VALUE}
-                              onValueChange={(value) => {
-                                const nextTemplate =
-                                  value === NO_TEMPLATE_VALUE ? "" : value;
-                                updateEditDraft({
-                                  selectedTemplate: nextTemplate,
-                                  allowTemplateSelection: nextTemplate
-                                    ? draft.allowTemplateSelection
-                                    : false,
-                                });
-                              }}
-                              disabled={
-                                !draft.selectedProject ||
-                                loadingEditTemplates ||
-                                templateOptions.length === 0
-                              }
-                            >
-                              <SelectTrigger
-                                id={`edit-template-${form.id}`}
-                                className="w-full"
-                              >
-                                <SelectValue
-                                  placeholder={
-                                    loadingEditTemplates
-                                      ? "Loading templates..."
-                                      : "Choose a default issue template"
-                                  }
-                                />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value={NO_TEMPLATE_VALUE}>
-                                  No template
-                                </SelectItem>
-                                {templateOptions.map((template) => (
-                                  <SelectItem
-                                    key={template.id}
-                                    value={template.id}
-                                  >
-                                    {template.team
-                                      ? `${template.team.name} · ${template.name}`
-                                      : template.name}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
                         </div>
-
-                        <label className="flex items-start gap-3 rounded-md border border-border/60 p-3 text-sm">
-                          <input
-                            type="checkbox"
-                            className="mt-0.5 h-4 w-4"
-                            checked={draft.allowTemplateSelection}
-                            disabled={!draft.selectedTemplate}
-                            onChange={(event) =>
-                              updateEditDraft({
-                                allowTemplateSelection: event.target.checked,
-                              })
-                            }
-                          />
-                          <span>
-                            <span className="block font-medium">
-                              Let submitters change the template
-                            </span>
-                            <span className="block text-xs text-muted-foreground">
-                              When enabled, the public form will show compatible issue templates with your default preselected.
-                            </span>
-                          </span>
-                        </label>
 
                         <div className="space-y-4">
                           <div className="space-y-2">
@@ -1147,13 +878,6 @@ export default function FormsPage() {
                             <span className="rounded-full bg-primary/10 px-2 py-1 text-xs text-primary">
                               {form.linear_project_name || form.project_name}
                             </span>
-                            {form.linear_template_name && (
-                              <span className="rounded-full bg-muted px-2 py-1 text-xs text-muted-foreground">
-                                {form.allow_template_selection
-                                  ? `${form.linear_template_name} · changeable`
-                                  : form.linear_template_name}
-                              </span>
-                            )}
                           </div>
                           <p className="mb-2 text-base text-foreground">
                             {form.form_title}

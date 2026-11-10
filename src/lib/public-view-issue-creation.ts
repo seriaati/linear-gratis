@@ -75,14 +75,12 @@ type LinearIssueInput = {
   projectId?: string;
   teamId: string;
   labelIds?: string[];
-  templateId?: string;
 };
 
 export type PublicViewIssueCreateInput = {
   title: string;
   description?: string;
   labelIds?: string[];
-  templateId?: string;
 };
 
 export type LinearIssueCreationSource = {
@@ -390,7 +388,6 @@ async function createLinearIssue(
       ...(input.projectId && { projectId: input.projectId }),
       teamId: input.teamId,
       ...(input.labelIds && input.labelIds.length > 0 && { labelIds: input.labelIds }),
-      ...(input.templateId && { templateId: input.templateId }),
     },
   };
 
@@ -484,7 +481,6 @@ export async function createIssueForLinearSource(
     ...(sourceProjectId ? { projectId: sourceProjectId } : {}),
     teamId: teamMetadata.id,
     labelIds: finalLabelIds,
-    ...(issue.templateId ? { templateId: issue.templateId } : {}),
   });
 
   if (result.errors) {

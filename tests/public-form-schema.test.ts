@@ -5,7 +5,7 @@ import { publicFormSchema } from '../src/lib/public-form-schema'
 const submission = {
   customerName: 'Feedback sender', customerEmail: 'sender@example.com',
   issueTitle: 'Estimate feedback', issueBody: 'The estimate needs attention.',
-  attachmentUrl: '', templateId: '',
+  attachmentUrl: '',
 }
 
 describe('public form validation', () => {
@@ -17,7 +17,7 @@ describe('public form validation', () => {
     if (parsed.success) assert.equal(parsed.data.externalId, reference)
   })
   test('accepts exact limits and returns field errors beyond them', () => {
-    const limits = { customerName: 200, issueTitle: 300, issueBody: 10000, externalId: 2048, templateId: 100 }
+    const limits = { customerName: 200, issueTitle: 300, issueBody: 10000, externalId: 2048 }
     for (const [field, limit] of Object.entries(limits)) {
       assert.equal(publicFormSchema.safeParse({ ...submission, [field]: 'x'.repeat(limit) }).success, true)
       const parsed = publicFormSchema.safeParse({ ...submission, [field]: 'x'.repeat(limit + 1) })

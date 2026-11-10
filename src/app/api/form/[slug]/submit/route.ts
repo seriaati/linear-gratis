@@ -1,24 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase'
 import { checkRateLimit, getClientIp, rateLimitResponse } from '@/lib/request-security'
-import { uploadFileToLinear } from '@/lib/linear-file-upload'
-import {
-  MAX_FORM_ATTACHMENT_FILES,
-  MAX_FORM_SUBMIT_BODY_BYTES,
-  validateFormAttachmentFile,
-} from '@/lib/form-attachment'
 import { resolveLinearTokenForForm } from '@/lib/public-form'
-import { fetchAvailableIssueTemplates } from '@/lib/linear-templates'
 import {
   createIssueForLinearSource,
   type LinearCreatedIssue,
 } from '@/lib/public-view-issue-creation'
 import { publicFormSchema as submitSchema, type PublicFormValues as SubmitValues } from '@/lib/public-form-schema'
 
-type ParsedSubmitPayload = {
-  values: SubmitValues
-  attachmentFiles: File[]
-}
+// Text fields only; well above the schema's character limits even when every character is 4-byte UTF-8.
+const MAX_FORM_SUBMIT_BODY_BYTES = 128 * 1024
 
 type FormLookup = {
   id: string
@@ -27,44 +18,6 @@ type FormLookup = {
   linear_connection_id?: string | null
   project_id?: string | null
   linear_project_id?: string | null
-  linear_template_id?: string | null
-  allow_template_selection?: boolean
-}
-
-function getFormString(formData: FormData, key: string): string {
-  const value = formData.get(key)
-  return typeof value === 'string' ? value : ''
-}
-
-function isUploadedFile(value: FormDataEntryValue | null): value is File {
-  return typeof File !== 'undefined' && value instanceof File && value.name.trim().length > 0
-}
-
-async function parseSubmitPayload(request: NextRequest): Promise<ParsedSubmitPayload> {
-  const contentType = request.headers.get('content-type') || ''
-
-  if (contentType.includes('multipart/form-data')) {
-    const formData = await request.formData()
-    const attachmentFiles = [
-      ...formData.getAll('attachmentFiles'),
-      ...formData.getAll('attachmentFile'),
-    ].filter(isUploadedFile)
-
-    return {
-      values: {
-        customerName: getFormString(formData, 'customerName'),
-        customerEmail: getFormString(formData, 'customerEmail'),
-        externalId: getFormString(formData, 'externalId'),
-        issueTitle: getFormString(formData, 'issueTitle'),
-        issueBody: getFormString(formData, 'issueBody'),
-        attachmentUrl: getFormString(formData, 'attachmentUrl'),
-        templateId: getFormString(formData, 'templateId'),
-      },
-      attachmentFiles,
-    }
-  }
-
-  return { values: (await request.json()) as SubmitValues, attachmentFiles: [] }
 }
 
 async function loadActiveForm(slug: string): Promise<FormLookup | null> {
@@ -76,9 +29,7 @@ async function loadActiveForm(slug: string): Promise<FormLookup | null> {
       organisation_id,
       linear_connection_id,
       project_id,
-      linear_project_id,
-      linear_template_id,
-      allow_template_selection
+      linear_project_id
     `)
     .eq('slug', slug)
     .eq('is_active', true)
@@ -91,9 +42,7 @@ async function loadActiveForm(slug: string): Promise<FormLookup | null> {
   if (
     expanded.error?.code === '42703' ||
     expanded.error?.message?.includes('linear_connection_id') ||
-    expanded.error?.message?.includes('linear_project_id') ||
-    expanded.error?.message?.includes('linear_template_id') ||
-    expanded.error?.message?.includes('allow_template_selection')
+    expanded.error?.message?.includes('linear_project_id')
   ) {
     const legacy = await supabaseAdmin
       .from('customer_request_forms')
@@ -252,41 +201,6 @@ function buildIssueDescription(
   return appendAttachmentLinks(description, attachments)
 }
 
-async function resolveTemplateIdForSubmission(args: {
-  apiToken: string
-  form: FormLookup
-  projectId: string
-  requestedTemplateId?: string
-}): Promise<{ ok: true; templateId?: string } | { ok: false; status: number; error: string }> {
-  const configuredTemplateId = args.form.linear_template_id || undefined
-  const requestedTemplateId = args.requestedTemplateId || undefined
-  const templateId = args.form.allow_template_selection
-    ? requestedTemplateId || configuredTemplateId
-    : configuredTemplateId
-
-  if (!templateId) return { ok: true }
-
-  const templatesResult = await fetchAvailableIssueTemplates(args.apiToken, {
-    projectId: args.projectId,
-  })
-  if (!templatesResult.success) {
-    return { ok: false, status: 502, error: 'Failed to validate Linear templates' }
-  }
-
-  const availableTemplateIds = new Set(templatesResult.templates.map((template) => template.id))
-  if (!availableTemplateIds.has(templateId)) {
-    return {
-      ok: false,
-      status: requestedTemplateId ? 400 : 500,
-      error: requestedTemplateId
-        ? 'Selected template is not available for this form.'
-        : 'Form template configuration error. Please contact the form owner.',
-    }
-  }
-
-  return { ok: true, templateId }
-}
-
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ slug: string }> }
@@ -300,7 +214,7 @@ export async function POST(
     const contentLength = Number(request.headers.get('content-length') || 0)
     if (Number.isFinite(contentLength) && contentLength > MAX_FORM_SUBMIT_BODY_BYTES) {
       return NextResponse.json(
-        { success: false, error: 'Attachment is too large.' },
+        { success: false, error: 'Submission is too large.' },
         { status: 413 }
       )
     }
@@ -312,8 +226,7 @@ export async function POST(
     })
     if (!rateLimit.ok) return rateLimitResponse(rateLimit.retryAfterSeconds)
 
-    const payload = await parseSubmitPayload(request)
-    const parsed = submitSchema.safeParse(payload.values)
+    const parsed = submitSchema.safeParse(await request.json())
     if (!parsed.success) {
       return NextResponse.json(
         { success: false, error: 'Invalid submission', issues: parsed.error.issues },
@@ -321,22 +234,6 @@ export async function POST(
       )
     }
     const values = parsed.data
-    if (payload.attachmentFiles.length > MAX_FORM_ATTACHMENT_FILES) {
-      return NextResponse.json(
-        { success: false, error: `You can attach up to ${MAX_FORM_ATTACHMENT_FILES} files` },
-        { status: 400 }
-      )
-    }
-
-    for (const attachmentFile of payload.attachmentFiles) {
-      const fileValidation = validateFormAttachmentFile(attachmentFile)
-      if (!fileValidation.ok) {
-        return NextResponse.json(
-          { success: false, error: fileValidation.error },
-          { status: 400 }
-        )
-      }
-    }
 
     const form = await loadActiveForm(slug)
     if (!form) {
@@ -359,35 +256,10 @@ export async function POST(
       )
     }
 
-    let attachmentUrl = values.attachmentUrl || undefined
+    const attachmentUrl = values.attachmentUrl || undefined
     const issueAttachments: Array<{ fileName: string; assetUrl: string }> = []
     if (attachmentUrl) {
       issueAttachments.push({ fileName: 'Attachment', assetUrl: attachmentUrl })
-    }
-
-    for (const attachmentFile of payload.attachmentFiles) {
-      const uploadResult = await uploadFileToLinear(linearToken, attachmentFile)
-      if (!uploadResult.success) {
-        return NextResponse.json(
-          { success: false, error: uploadResult.error || 'Failed to upload attachment' },
-          { status: 502 }
-        )
-      }
-      attachmentUrl ??= uploadResult.assetUrl
-      issueAttachments.push({ fileName: attachmentFile.name, assetUrl: uploadResult.assetUrl })
-    }
-
-    const templateResult = await resolveTemplateIdForSubmission({
-      apiToken: linearToken,
-      form,
-      projectId,
-      requestedTemplateId: values.templateId || undefined,
-    })
-    if (!templateResult.ok) {
-      return NextResponse.json(
-        { success: false, error: templateResult.error },
-        { status: templateResult.status }
-      )
     }
 
     const issueResult = await createIssueForLinearSource(
@@ -396,7 +268,6 @@ export async function POST(
       {
         title: values.issueTitle,
         description: buildIssueDescription(values, issueAttachments),
-        ...(templateResult.templateId ? { templateId: templateResult.templateId } : {}),
       },
     )
 

@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase'
-import { fetchAvailableIssueTemplates, type LinearEditorContent } from '@/lib/linear-templates'
-import { resolveLinearTokenForForm } from '@/lib/public-form'
 
 type PublicFormConfigRow = {
   id: string
@@ -16,17 +14,6 @@ type PublicFormConfigRow = {
   form_title: string
   description?: string | null
   is_active: boolean
-  linear_template_id?: string | null
-  linear_template_name?: string | null
-  allow_template_selection?: boolean
-}
-
-type PublicFormTemplate = {
-  id: string
-  name: string
-  description: string | null
-  description_content: LinearEditorContent | null
-  team: { id: string; name: string; key?: string | null } | null
 }
 
 type PublicFormApiPayload = {
@@ -40,12 +27,6 @@ type PublicFormApiPayload = {
     form_title: string
     description?: string | null
     is_active: boolean
-    linear_template_id: string | null
-    linear_template_name: string | null
-    linear_template_description: string | null
-    linear_template_description_content: LinearEditorContent | null
-    allow_template_selection: boolean
-    available_templates: PublicFormTemplate[]
   }
 }
 
@@ -151,10 +132,7 @@ async function loadActivePublicForm(slug: string): Promise<PublicFormConfigRow |
       linear_project_id,
       form_title,
       description,
-      is_active,
-      linear_template_id,
-      linear_template_name,
-      allow_template_selection
+      is_active
     `)
     .eq('slug', slug)
     .eq('is_active', true)
@@ -164,12 +142,9 @@ async function loadActivePublicForm(slug: string): Promise<PublicFormConfigRow |
 
   if (
     expanded.error?.code === '42703' ||
-    expanded.error?.message?.includes('linear_template_id') ||
-    expanded.error?.message?.includes('linear_template_name') ||
     expanded.error?.message?.includes('linear_project_id') ||
     expanded.error?.message?.includes('linear_project_name') ||
-    expanded.error?.message?.includes('linear_connection_id') ||
-    expanded.error?.message?.includes('allow_template_selection')
+    expanded.error?.message?.includes('linear_connection_id')
   ) {
     const legacy = await supabaseAdmin
       .from('customer_request_forms')
@@ -215,33 +190,6 @@ export async function GET(
       return NextResponse.json({ success: false, error: 'Form not found' }, { status: 404 })
     }
 
-    let availableTemplates: PublicFormTemplate[] = []
-    let linearTemplateDescription: string | null = null
-    let linearTemplateDescriptionContent: LinearEditorContent | null = null
-
-    const projectId = form.linear_project_id
-    if ((form.allow_template_selection || form.linear_template_id) && projectId) {
-      const linearToken = await resolveLinearTokenForForm(form)
-      if (linearToken) {
-        const templatesResult = await fetchAvailableIssueTemplates(linearToken, { projectId })
-        if (templatesResult.success) {
-          const templateOptions = templatesResult.templates.map((template) => ({
-            id: template.id,
-            name: template.name,
-            description: template.description,
-            description_content: template.descriptionContent,
-            team: template.team,
-          }))
-          availableTemplates = form.allow_template_selection ? templateOptions : []
-          const defaultTemplate = templateOptions.find(
-            (template) => template.id === form.linear_template_id,
-          )
-          linearTemplateDescription = defaultTemplate?.description ?? null
-          linearTemplateDescriptionContent = defaultTemplate?.description_content ?? null
-        }
-      }
-    }
-
     const payload: PublicFormApiPayload = {
       success: true,
       form: {
@@ -253,12 +201,6 @@ export async function GET(
         form_title: form.form_title,
         description: form.description,
         is_active: form.is_active,
-        linear_template_id: form.linear_template_id ?? null,
-        linear_template_name: form.linear_template_name ?? null,
-        linear_template_description: linearTemplateDescription,
-        linear_template_description_content: linearTemplateDescriptionContent,
-        allow_template_selection: Boolean(form.allow_template_selection),
-        available_templates: availableTemplates,
       },
     }
 

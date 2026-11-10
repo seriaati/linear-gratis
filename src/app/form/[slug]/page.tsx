@@ -5,43 +5,17 @@ import { useParams, useSearchParams } from 'next/navigation'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { publicFormSchema as formSchema, type PublicFormValues as FormValues } from '@/lib/public-form-schema'
-import { Paperclip } from 'lucide-react'
 import { Toaster, toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-} from '@/components/ui/select'
-import { AttachmentUploadDropzone } from '@/components/attachment-upload-dropzone'
 import { LinearMarkdownEditor } from '@/components/linear-markdown-editor'
 import { useBrandingSettings, applyBrandingToPage, getBrandingStyles } from '@/hooks/use-branding'
 import { cn } from '@/lib/utils'
-import {
-  MAX_FORM_ATTACHMENT_FILES,
-  validateFormAttachmentFile,
-} from '@/lib/form-attachment'
 
 const PUBLIC_FORM_TOASTER_ID = 'public-form-submit'
 const PUBLIC_FORM_SUBMIT_TOAST_ID = 'public-form-submit-status'
-
-const fileKey = (file: File) => `${file.name}-${file.lastModified}-${file.size}`
-
-type LinearIssueTemplate = {
-  id: string
-  name: string
-  description: string | null
-  description_content?: LinearEditorContent | null
-  team: {
-    id: string
-    name: string
-    key?: string | null
-  } | null
-}
 
 type PublicFormConfig = {
   id: string
@@ -52,58 +26,6 @@ type PublicFormConfig = {
   form_title: string
   description?: string
   is_active: boolean
-  linear_template_id?: string | null
-  linear_template_name?: string | null
-  linear_template_description?: string | null
-  linear_template_description_content?: LinearEditorContent | null
-  allow_template_selection: boolean
-  available_templates: LinearIssueTemplate[]
-}
-
-type LinearEditorContent = {
-  type: string
-  text?: string
-  attrs?: Record<string, unknown>
-  marks?: Array<{ type: string; attrs?: Record<string, unknown> }>
-  content?: LinearEditorContent[]
-}
-
-function getTemplateDescriptionFromConfig(
-  formConfig: PublicFormConfig | null,
-  templateId?: string | null,
-) {
-  if (!formConfig || !templateId) return ''
-
-  if (
-    templateId === formConfig.linear_template_id &&
-    formConfig.linear_template_description
-  ) {
-    return formConfig.linear_template_description
-  }
-
-  return (
-    formConfig.available_templates.find((template) => template.id === templateId)
-      ?.description || ''
-  )
-}
-
-function getTemplateDescriptionContentFromConfig(
-  formConfig: PublicFormConfig | null,
-  templateId?: string | null,
-) {
-  if (!formConfig || !templateId) return null
-
-  if (
-    templateId === formConfig.linear_template_id &&
-    formConfig.linear_template_description_content
-  ) {
-    return formConfig.linear_template_description_content
-  }
-
-  return (
-    formConfig.available_templates.find((template) => template.id === templateId)
-      ?.description_content || null
-  )
 }
 
 export default function PublicFormPage() {
@@ -118,9 +40,6 @@ export default function PublicFormPage() {
   const [formConfig, setFormConfig] = useState<PublicFormConfig | null>(null)
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
-  const [attachmentFiles, setAttachmentFiles] = useState<File[]>([])
-  const [attachmentError, setAttachmentError] = useState<string | null>(null)
-  const [selectedTemplateId, setSelectedTemplateId] = useState('')
 
   // Load branding settings for this form's owner
   const { branding } = useBrandingSettings(
@@ -143,7 +62,6 @@ export default function PublicFormPage() {
   }, [searchParams])
 
   const prefillData = getUrlPrefillData()
-  const issueBodyPrefill = prefillData.issueBody || ''
 
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -154,45 +72,8 @@ export default function PublicFormPage() {
       issueTitle: prefillData.issueTitle || '',
       issueBody: prefillData.issueBody || '',
       attachmentUrl: prefillData.attachmentUrl || '',
-      templateId: '',
     },
   })
-
-  const getTemplateDescription = useCallback((templateId?: string | null) => {
-    return getTemplateDescriptionFromConfig(formConfig, templateId)
-  }, [formConfig])
-
-  const applyTemplateDescription = useCallback((
-    templateId?: string | null,
-    options: { markDirty?: boolean } = {},
-  ) => {
-    const templateDescription = getTemplateDescription(templateId)
-    if (!templateDescription) return
-
-    const markDirty = options.markDirty ?? true
-    form.setValue('issueBody', templateDescription, {
-      shouldDirty: markDirty,
-      shouldTouch: markDirty,
-      shouldValidate: true,
-    })
-  }, [form, getTemplateDescription])
-
-  const effectiveSelectedTemplateId =
-    selectedTemplateId || formConfig?.linear_template_id || ''
-  const selectedTemplate = formConfig?.available_templates.find(
-    (template) => template.id === effectiveSelectedTemplateId,
-  )
-  const selectedTemplateLabel = selectedTemplate
-    ? selectedTemplate.team
-      ? `${selectedTemplate.team.name} · ${selectedTemplate.name}`
-      : selectedTemplate.name
-    : formConfig?.linear_template_id === effectiveSelectedTemplateId
-      ? formConfig.linear_template_name || ''
-      : ''
-  const selectedTemplateDescriptionContent = getTemplateDescriptionContentFromConfig(
-    formConfig,
-    effectiveSelectedTemplateId,
-  )
 
   const loadFormConfig = useCallback(async () => {
     try {
@@ -206,42 +87,18 @@ export default function PublicFormPage() {
       if (!response.ok || !data.success || !data.form) {
         console.error('Error loading form config:', data.error || response.statusText)
       } else {
-        const loadedForm = data.form
-        const templateId = loadedForm.linear_template_id || ''
-        const templateDescription = getTemplateDescriptionFromConfig(loadedForm, templateId)
-
-        if (!issueBodyPrefill.trim() && !form.getValues('issueBody').trim() && templateDescription) {
-          form.reset({
-            ...form.getValues(),
-            issueBody: templateDescription,
-            templateId,
-          })
-          setSelectedTemplateId(templateId)
-        }
-
-        setFormConfig(loadedForm)
+        setFormConfig(data.form)
       }
     } catch (error) {
       console.error('Error loading form config:', error)
     } finally {
       setLoading(false)
     }
-  }, [form, issueBodyPrefill, slug])
+  }, [slug])
 
   useEffect(() => {
     loadFormConfig()
   }, [loadFormConfig])
-
-  useEffect(() => {
-    if (!formConfig) return
-    const templateId = formConfig.linear_template_id || ''
-    setSelectedTemplateId(templateId)
-    form.setValue('templateId', templateId)
-
-    if (!issueBodyPrefill.trim() && !form.getValues('issueBody').trim()) {
-      applyTemplateDescription(templateId)
-    }
-  }, [applyTemplateDescription, form, formConfig, issueBodyPrefill])
 
   // Apply branding when it loads
   useEffect(() => {
@@ -250,77 +107,16 @@ export default function PublicFormPage() {
     }
   }, [branding, formConfig?.form_title, isEmbedded])
 
-  const clearAttachmentFiles = () => {
-    setAttachmentFiles([])
-    setAttachmentError(null)
-  }
-
-  const addAttachmentFiles = (files: File[]) => {
-    setAttachmentError(null)
-    if (files.length === 0) return
-
-    const acceptedFiles: File[] = []
-    const seen = new Set(attachmentFiles.map(fileKey))
-
-    for (const file of files) {
-      if (attachmentFiles.length + acceptedFiles.length >= MAX_FORM_ATTACHMENT_FILES) {
-        setAttachmentError(`You can attach up to ${MAX_FORM_ATTACHMENT_FILES} files`)
-        break
-      }
-
-      const validation = validateFormAttachmentFile(file)
-      if (!validation.ok) {
-        setAttachmentError(`${file.name}: ${validation.error}`)
-        continue
-      }
-
-      const key = fileKey(file)
-      if (seen.has(key)) continue
-
-      seen.add(key)
-      acceptedFiles.push(file)
-    }
-
-    if (acceptedFiles.length > 0) {
-      setAttachmentFiles((current) => [...current, ...acceptedFiles])
-    }
-  }
-
-  const removeAttachmentFile = (index: number) => {
-    setAttachmentFiles((current) => current.filter((_, fileIndex) => fileIndex !== index))
-    setAttachmentError(null)
-  }
-
   const onFormSubmit = async (values: FormValues) => {
     if (!formConfig) return
-
-    for (const attachmentFile of attachmentFiles) {
-      const validation = validateFormAttachmentFile(attachmentFile)
-      if (!validation.ok) {
-        setAttachmentError(`${attachmentFile.name}: ${validation.error}`)
-        return
-      }
-    }
 
     setSubmitting(true)
 
     try {
-      const payload = new globalThis.FormData()
-      payload.set('customerName', values.customerName)
-      payload.set('customerEmail', values.customerEmail)
-      payload.set('externalId', values.externalId || '')
-      payload.set('issueTitle', values.issueTitle)
-      payload.set('issueBody', values.issueBody)
-      payload.set('attachmentUrl', values.attachmentUrl || '')
-      payload.set(
-        'templateId',
-        selectedTemplateId || values.templateId || formConfig.linear_template_id || '',
-      )
-      attachmentFiles.forEach((file) => payload.append('attachmentFiles', file))
-
       const response = await fetch(`/api/form/${encodeURIComponent(slug)}/submit`, {
         method: 'POST',
-        body: payload,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(values),
       })
 
       const data = (await response.json()) as {
@@ -335,8 +131,6 @@ export default function PublicFormPage() {
       }
 
       if (response.ok && data.success) {
-        const defaultTemplateId = formConfig.linear_template_id || ''
-        const defaultIssueBody = getTemplateDescription(defaultTemplateId)
         const issueIdentifier = data.data?.issue?.identifier
 
         toast.success('Request submitted', {
@@ -352,12 +146,9 @@ export default function PublicFormPage() {
           customerEmail: '',
           externalId: '',
           issueTitle: '',
-          issueBody: defaultIssueBody,
+          issueBody: '',
           attachmentUrl: '',
-          templateId: defaultTemplateId,
         })
-        setSelectedTemplateId(defaultTemplateId)
-        clearAttachmentFiles()
       } else {
         const validationMessages = data.issues?.flatMap((issue) => {
           const field = issue.path.at(0)
@@ -493,49 +284,6 @@ export default function PublicFormPage() {
                 onSubmit={form.handleSubmit(onFormSubmit)}
                 className={cn('space-y-6', isEmbedded && 'space-y-4')}
               >
-                {formConfig.allow_template_selection && formConfig.available_templates.length > 0 && (
-                  <FormField
-                    control={form.control}
-                    name="templateId"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Request type</FormLabel>
-                        <Select
-                          value={effectiveSelectedTemplateId || undefined}
-                          onValueChange={(templateId) => {
-                            setSelectedTemplateId(templateId)
-                            field.onChange(templateId)
-                            applyTemplateDescription(templateId)
-                          }}
-                        >
-                          <FormControl>
-                            <SelectTrigger className="w-full">
-                              <span
-                                className={cn(
-                                  'block truncate',
-                                  !selectedTemplateLabel && 'text-muted-foreground',
-                                )}
-                              >
-                                {selectedTemplateLabel || 'Choose a request type'}
-                              </span>
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent>
-                            {formConfig.available_templates.map((template) => (
-                              <SelectItem key={template.id} value={template.id}>
-                                {template.team
-                                  ? `${template.team.name} · ${template.name}`
-                                  : template.name}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                )}
-
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <FormField
                     control={form.control}
@@ -607,8 +355,6 @@ export default function PublicFormPage() {
                       <FormControl>
                         <LinearMarkdownEditor
                           value={field.value}
-                          content={selectedTemplateDescriptionContent}
-                          contentKey={effectiveSelectedTemplateId}
                           onChange={field.onChange}
                           onBlur={field.onBlur}
                           name={field.name}
@@ -625,26 +371,13 @@ export default function PublicFormPage() {
                   name="attachmentUrl"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Attachments (optional)</FormLabel>
+                      <FormLabel>Attachment URL (optional)</FormLabel>
                       <FormControl>
-                        <div className="space-y-3">
-                          <Input type="hidden" {...field} />
-                          <AttachmentUploadDropzone
-                            files={attachmentFiles}
-                            error={attachmentError}
-                            busy={submitting}
-                            disabled={submitting}
-                            maxFiles={MAX_FORM_ATTACHMENT_FILES}
-                            onFilesAdded={addAttachmentFiles}
-                            onRemoveFile={removeAttachmentFile}
-                          />
-                          {field.value && (
-                            <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
-                              <Paperclip className="size-4 shrink-0" />
-                              <span className="truncate">Linked attachment included</span>
-                            </div>
-                          )}
-                        </div>
+                        <Input
+                          type="url"
+                          placeholder="https://example.com/screenshot.png"
+                          {...field}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
