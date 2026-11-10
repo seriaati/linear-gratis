@@ -13,9 +13,20 @@ export async function GET(request: Request) {
 
   if (code) {
     const supabase = await createClient()
-    const { error } = await supabase.auth.exchangeCodeForSession(code)
+    const { data, error } = await supabase.auth.exchangeCodeForSession(code)
 
-    if (!error) {
+    if (!error && data.user) {
+      // If signups are disabled, reject users who just created their account
+      if (process.env.DISABLE_SIGNUPS === 'true') {
+        const createdAt = new Date(data.user.created_at).getTime()
+        const isNewUser = Date.now() - createdAt < 10_000
+
+        if (isNewUser) {
+          await supabase.auth.signOut()
+          return NextResponse.redirect(`${origin}/login?error=signups_disabled`)
+        }
+      }
+
       // Always redirect to the request's own origin. Do not trust
       // X-Forwarded-Host because it can be set by an attacker via a permissive
       // intermediary and turned into a post-auth open redirect.
