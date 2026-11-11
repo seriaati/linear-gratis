@@ -1,5 +1,7 @@
 "use client";
 
+import { Github } from "@/components/icons/github";
+
 import { useAuth } from "@/contexts/auth-context";
 import { LinearIssueForm } from "@/components/linear-issue-form";
 import { Navigation } from "@/components/navigation";
@@ -12,10 +14,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { supabase } from "@/lib/supabase";
 import {
   ArrowRight,
-  Github,
   Users,
   MessageSquare,
   Share2,
@@ -45,7 +45,8 @@ export default function Home() {
       "Our team would love to see dark mode support in the dashboard. This would help reduce eye strain during late-night work sessions and align with our design system.",
   });
 
-  // Check if user has Linear API token set up
+  // Check if user has Linear API token set up (server-side, never exposes
+  // the token itself to the browser).
   const [hasLinearToken, setHasLinearToken] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -53,18 +54,15 @@ export default function Home() {
 
     const checkLinearToken = async () => {
       try {
-        const { data, error } = await supabase
-          .from("profiles")
-          .select("linear_api_token")
-          .eq("id", user.id)
-          .single();
-
-        if (error && error.code !== "PGRST116") {
-          console.error("Error loading profile:", error);
+        const response = await fetch("/api/profile/linear-token", {
+          method: "GET",
+        });
+        if (!response.ok) {
           setHasLinearToken(false);
-        } else {
-          setHasLinearToken(!!data?.linear_api_token);
+          return;
         }
+        const data = (await response.json()) as { hasToken?: boolean };
+        setHasLinearToken(Boolean(data.hasToken));
       } catch (error) {
         console.error("Error checking Linear token:", error);
         setHasLinearToken(false);

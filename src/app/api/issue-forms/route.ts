@@ -1,16 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { supabaseAdmin } from '@/lib/supabase';
 import type { IssueForm, IssueFormQuestion } from '@/lib/supabase';
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-
-const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false
-  }
-});
+import { getActiveOrganisationIdAdmin } from '@/lib/organisations';
 
 async function getUser(request: NextRequest) {
   const authHeader = request.headers.get('Authorization');
@@ -30,10 +21,16 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
     }
 
+    const organisationId = await getActiveOrganisationIdAdmin(supabaseAdmin, user.id);
+    if (!organisationId) {
+      return NextResponse.json({ error: 'No active organisation for this user' }, { status: 500 });
+    }
+
+    // supabaseAdmin bypasses RLS, so the organisation filter is load-bearing.
     const { data: issueForms, error } = await supabaseAdmin
       .from('issue_forms')
       .select('*')
-      .eq('user_id', user.id)
+      .eq('organisation_id', organisationId)
       .order('created_at', { ascending: false });
 
     if (error) throw error;
@@ -68,10 +65,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Name is required' }, { status: 400 });
     }
 
+    const organisationId = await getActiveOrganisationIdAdmin(supabaseAdmin, user.id);
+    if (!organisationId) {
+      return NextResponse.json({ error: 'No active organisation for this user' }, { status: 500 });
+    }
+
     const { data: issueForm, error } = await supabaseAdmin
       .from('issue_forms')
       .insert({
         user_id: user.id,
+        created_by: user.id,
+        organisation_id: organisationId,
         name: name.trim(),
         questions,
       })

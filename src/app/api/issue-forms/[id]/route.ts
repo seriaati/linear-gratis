@@ -1,16 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { supabaseAdmin } from '@/lib/supabase';
 import type { IssueFormQuestion } from '@/lib/supabase';
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-
-const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false
-  }
-});
+import { assertOrgMember } from '@/lib/organisations';
 
 async function getUser(request: NextRequest) {
   const authHeader = request.headers.get('Authorization');
@@ -21,6 +12,18 @@ async function getUser(request: NextRequest) {
   const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
   if (error || !user) return null;
   return user;
+}
+
+// supabaseAdmin bypasses RLS, so org membership must be checked by hand.
+async function canAccessIssueForm(userId: string, id: string): Promise<boolean> {
+  const { data: issueForm } = await supabaseAdmin
+    .from('issue_forms')
+    .select('organisation_id')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (!issueForm) return false;
+  return assertOrgMember(supabaseAdmin, userId, issueForm.organisation_id);
 }
 
 export async function GET(
@@ -34,12 +37,14 @@ export async function GET(
     }
 
     const { id } = await params;
+    if (!(await canAccessIssueForm(user.id, id))) {
+      return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    }
 
     const { data: issueForm, error } = await supabaseAdmin
       .from('issue_forms')
       .select('*')
       .eq('id', id)
-      .eq('user_id', user.id)
       .single();
 
     if (error || !issueForm) {
@@ -73,6 +78,10 @@ export async function PATCH(
     }
 
     const { id } = await params;
+    if (!(await canAccessIssueForm(user.id, id))) {
+      return NextResponse.json({ error: 'Not found or update failed' }, { status: 404 });
+    }
+
     const body = await request.json() as { name?: string; questions?: IssueFormQuestion[] };
 
     const updates: { name?: string; questions?: IssueFormQuestion[] } = {};
@@ -90,7 +99,6 @@ export async function PATCH(
       .from('issue_forms')
       .update(updates)
       .eq('id', id)
-      .eq('user_id', user.id)
       .select()
       .single();
 
@@ -125,12 +133,14 @@ export async function DELETE(
     }
 
     const { id } = await params;
+    if (!(await canAccessIssueForm(user.id, id))) {
+      return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    }
 
     const { error } = await supabaseAdmin
       .from('issue_forms')
       .delete()
-      .eq('id', id)
-      .eq('user_id', user.id);
+      .eq('id', id);
 
     if (error) throw error;
 

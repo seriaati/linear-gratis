@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "@/contexts/auth-context";
 import { Button } from "@/components/ui/button";
 import {
@@ -44,22 +44,10 @@ export default function BrandingPage() {
   // Branding state - start with minimal defaults, let CSS theme handle colours
   const [branding, setBranding] = useState<Partial<BrandingSettings>>({
     show_powered_by: true,
-    logo_width: 120,
     logo_height: 40,
   });
 
-  useEffect(() => {
-    if (authLoading) return;
-
-    if (!user) {
-      router.push("/login");
-      return;
-    }
-
-    loadBranding();
-  }, [user, authLoading, router]);
-
-  const loadBranding = async () => {
+  const loadBranding = useCallback(async () => {
     if (!user) return;
 
     setLoading(true);
@@ -80,7 +68,7 @@ export default function BrandingPage() {
       if (response.ok) {
         const data = (await response.json()) as { branding: BrandingSettings | null };
         if (data.branding) {
-          setBranding({ ...branding, ...data.branding });
+          setBranding((prev) => ({ ...prev, ...data.branding }));
         }
       }
     } catch (error) {
@@ -88,7 +76,18 @@ export default function BrandingPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [user]);
+
+  useEffect(() => {
+    if (authLoading) return;
+
+    if (!user) {
+      router.push("/login");
+      return;
+    }
+
+    loadBranding();
+  }, [user, authLoading, router, loadBranding]);
 
   const handleSave = async () => {
     if (!user) return;
@@ -191,7 +190,6 @@ export default function BrandingPage() {
         heading_font_family: undefined,
         // Reset display settings
         show_powered_by: true,
-        logo_width: 120,
         logo_height: 40,
         // Clear assets and content
         logo_url: undefined,
@@ -315,7 +313,7 @@ export default function BrandingPage() {
                 Logo and favicon
               </CardTitle>
               <CardDescription>
-                Upload your brand logo and favicon (PNG, JPG, SVG, or WebP, max 2MB)
+                Upload your brand logo and favicon (PNG, JPG, or WebP, max 2MB)
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -324,6 +322,7 @@ export default function BrandingPage() {
                   <Label>Logo</Label>
                   {branding.logo_url && (
                     <div className="border border-border rounded-lg p-4 bg-muted/20">
+                      {/* eslint-disable-next-line @next/next/no-img-element -- user-provided URL, domain not known at build time */}
                       <img
                         src={branding.logo_url}
                         alt="Logo preview"
@@ -334,7 +333,7 @@ export default function BrandingPage() {
                   <div className="flex gap-2">
                     <Input
                       type="file"
-                      accept="image/png,image/jpeg,image/jpg,image/svg+xml,image/webp"
+                      accept="image/png,image/jpeg,image/jpg,image/webp"
                       onChange={(e) => handleLogoUpload(e, "logo")}
                       disabled={uploading}
                       className="flex-1"
@@ -349,31 +348,20 @@ export default function BrandingPage() {
                       </Button>
                     )}
                   </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <Label htmlFor="logo-width" className="text-xs">Width (px)</Label>
-                      <Input
-                        id="logo-width"
-                        type="number"
-                        value={branding.logo_width || 120}
-                        onChange={(e) =>
-                          setBranding({ ...branding, logo_width: parseInt(e.target.value) })
-                        }
-                        className="h-8"
-                      />
-                    </div>
-                    <div>
-                      <Label htmlFor="logo-height" className="text-xs">Height (px)</Label>
-                      <Input
-                        id="logo-height"
-                        type="number"
-                        value={branding.logo_height || 40}
-                        onChange={(e) =>
-                          setBranding({ ...branding, logo_height: parseInt(e.target.value) })
-                        }
-                        className="h-8"
-                      />
-                    </div>
+                  <div>
+                    <Label htmlFor="logo-height" className="text-xs">Max height (px)</Label>
+                    <Input
+                      id="logo-height"
+                      type="number"
+                      value={branding.logo_height || 40}
+                      onChange={(e) =>
+                        setBranding({ ...branding, logo_height: parseInt(e.target.value) })
+                      }
+                      className="h-8"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Width scales automatically to preserve the logo&apos;s aspect ratio.
+                    </p>
                   </div>
                 </div>
 
@@ -381,6 +369,7 @@ export default function BrandingPage() {
                   <Label>Favicon</Label>
                   {branding.favicon_url && (
                     <div className="border border-border rounded-lg p-4 bg-muted/20 h-[100px] flex items-center justify-center">
+                      {/* eslint-disable-next-line @next/next/no-img-element -- user-provided URL, domain not known at build time */}
                       <img
                         src={branding.favicon_url}
                         alt="Favicon preview"
@@ -391,7 +380,7 @@ export default function BrandingPage() {
                   <div className="flex gap-2">
                     <Input
                       type="file"
-                      accept="image/png,image/jpeg,image/jpg,image/svg+xml,image/webp"
+                      accept="image/png,image/jpeg,image/jpg,image/webp"
                       onChange={(e) => handleLogoUpload(e, "favicon")}
                       disabled={uploading}
                       className="flex-1"

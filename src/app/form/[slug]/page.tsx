@@ -4,70 +4,51 @@ import { useState, useEffect, useCallback } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import * as z from 'zod'
+import { publicFormSchema as formSchema, type PublicFormValues as FormValues } from '@/lib/public-form-schema'
+import { Toaster, toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
-import { Textarea } from '@/components/ui/textarea'
-import { supabase, CustomerRequestForm } from '@/lib/supabase'
-import { LinearCustomerRequestManager } from '@/lib/linear'
+import { LinearMarkdownEditor } from '@/components/linear-markdown-editor'
 import { useBrandingSettings, applyBrandingToPage, getBrandingStyles } from '@/hooks/use-branding'
+import { cn } from '@/lib/utils'
 
-// Helper function to decrypt tokens via API
-async function decryptTokenViaAPI(encryptedToken: string): Promise<string> {
-  const response = await fetch('/api/decrypt-token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ encryptedToken })
-  })
+const PUBLIC_FORM_TOASTER_ID = 'public-form-submit'
+const PUBLIC_FORM_SUBMIT_TOAST_ID = 'public-form-submit-status'
 
-  if (!response.ok) {
-    throw new Error('Failed to decrypt token')
-  }
-
-  const data = await response.json() as { success: boolean; token?: string; error?: string }
-
-  if (!data.success || !data.token) {
-    throw new Error(data.error || 'Token decryption failed')
-  }
-
-  return data.token
+type PublicFormConfig = {
+  id: string
+  user_id: string
+  name: string
+  slug: string
+  project_name: string
+  form_title: string
+  description?: string
+  is_active: boolean
 }
-
-const formSchema = z.object({
-  customerName: z.string().min(1, 'Your name is required'),
-  customerEmail: z.string().email('Valid email is required'),
-  externalId: z.string().optional(),
-  issueTitle: z.string().min(1, 'Issue title is required'),
-  issueBody: z.string().min(1, 'Issue description is required'),
-  attachmentUrl: z.string().url().optional().or(z.literal('')),
-})
-
-type FormData = z.infer<typeof formSchema>
 
 export default function PublicFormPage() {
   const params = useParams()
   const searchParams = useSearchParams()
   const slug = params.slug as string
+  const isEmbedded = searchParams?.get('embed') === '1'
+  const requestedTheme = searchParams?.get('theme')
+  const toastTheme =
+    requestedTheme === 'dark' || requestedTheme === 'light' ? requestedTheme : 'system'
 
-  const [formConfig, setFormConfig] = useState<CustomerRequestForm | null>(null)
+  const [formConfig, setFormConfig] = useState<PublicFormConfig | null>(null)
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
-  const [result, setResult] = useState<{
-    success: boolean
-    message: string
-    data?: {
-      customer?: { id: string }
-      request?: { id: string }
-    }
-  } | null>(null)
 
   // Load branding settings for this form's owner
-  const { branding } = useBrandingSettings(formConfig?.user_id || null)
+  const { branding } = useBrandingSettings(
+    !isEmbedded ? formConfig?.user_id || null : null,
+    !isEmbedded && formConfig ? { type: 'form', slug: formConfig.slug } : null,
+  )
 
   // Parse URL parameters for prefilling
-  const getUrlPrefillData = useCallback((): Partial<FormData> => {
+  const getUrlPrefillData = useCallback((): Partial<FormValues> => {
     if (!searchParams) return {}
 
     return {
@@ -82,7 +63,7 @@ export default function PublicFormPage() {
 
   const prefillData = getUrlPrefillData()
 
-  const form = useForm<FormData>({
+  const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: {
       customerName: prefillData.customerName || '',
@@ -96,17 +77,17 @@ export default function PublicFormPage() {
 
   const loadFormConfig = useCallback(async () => {
     try {
-      const { data, error } = await supabase
-        .from('customer_request_forms')
-        .select('*')
-        .eq('slug', slug)
-        .eq('is_active', true)
-        .single()
+      const response = await fetch(`/api/form/${encodeURIComponent(slug)}`)
+      const data = (await response.json()) as {
+        success?: boolean
+        form?: PublicFormConfig
+        error?: string
+      }
 
-      if (error) {
-        console.error('Error loading form config:', error)
+      if (!response.ok || !data.success || !data.form) {
+        console.error('Error loading form config:', data.error || response.statusText)
       } else {
-        setFormConfig(data)
+        setFormConfig(data.form)
       }
     } catch (error) {
       console.error('Error loading form config:', error)
@@ -121,88 +102,77 @@ export default function PublicFormPage() {
 
   // Apply branding when it loads
   useEffect(() => {
-    if (branding) {
-      applyBrandingToPage(branding)
+    if (!isEmbedded && branding) {
+      applyBrandingToPage(branding, formConfig?.form_title)
     }
-  }, [branding])
+  }, [branding, formConfig?.form_title, isEmbedded])
 
-  const onFormSubmit = async (values: FormData) => {
+  const onFormSubmit = async (values: FormValues) => {
     if (!formConfig) return
 
     setSubmitting(true)
-    setResult(null)
 
     try {
-      // Get the user's encrypted Linear token
-      const { data: profile, error: profileError } = await supabase
-        .from('profiles')
-        .select('linear_api_token')
-        .eq('id', formConfig.user_id)
-        .single()
+      const response = await fetch(`/api/form/${encodeURIComponent(slug)}/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(values),
+      })
 
-      if (profileError || !profile?.linear_api_token) {
-        setResult({
-          success: false,
-          message: 'Form configuration error. Please contact the form owner.',
+      const data = (await response.json()) as {
+        success: boolean
+        error?: string
+        issues?: Array<{ path: Array<string | number>; message: string }>
+        data?: {
+          customer?: { id: string }
+          request?: { id: string }
+          issue?: { id: string; identifier: string }
+        }
+      }
+
+      if (response.ok && data.success) {
+        const issueIdentifier = data.data?.issue?.identifier
+
+        toast.success('Request submitted', {
+          id: PUBLIC_FORM_SUBMIT_TOAST_ID,
+          toasterId: PUBLIC_FORM_TOASTER_ID,
+          description: issueIdentifier
+            ? `Created ${issueIdentifier}. We'll get back to you soon.`
+            : 'We\'ll get back to you soon.',
+          duration: 6000,
         })
-        return
-      }
-
-      // Decrypt the token
-      let linearToken: string
-      try {
-        linearToken = await decryptTokenViaAPI(profile.linear_api_token)
-      } catch (error) {
-        console.error('Error decrypting token:', error)
-        setResult({
-          success: false,
-          message: 'Form configuration error. Please contact the form owner.',
+        form.reset({
+          customerName: '',
+          customerEmail: '',
+          externalId: '',
+          issueTitle: '',
+          issueBody: '',
+          attachmentUrl: '',
         })
-        return
-      }
-
-      // Create the Linear request
-      const linearManager = new LinearCustomerRequestManager(linearToken)
-
-      const customerData = {
-        name: values.customerName,
-        email: values.customerEmail,
-        ...(values.externalId && { externalId: values.externalId }),
-      }
-
-      const requestData = {
-        title: values.issueTitle,
-        body: values.issueBody,
-        ...(values.attachmentUrl && { attachmentUrl: values.attachmentUrl }),
-      }
-
-      const response = await linearManager.createRequestWithCustomer(
-        customerData,
-        requestData,
-        formConfig.project_id
-      )
-
-      if (response.success) {
-        setResult({
-          success: true,
-          message: 'Your request has been submitted successfully! We\'ll get back to you soon.',
-          data: {
-            customer: response.customer,
-            request: response.request
-          }
-        })
-        // Reset form
-        form.reset()
       } else {
-        setResult({
-          success: false,
-          message: `Failed to submit request: ${response.error || 'Unknown error'}`,
+        const validationMessages = data.issues?.flatMap((issue) => {
+          const field = issue.path.at(0)
+          if (typeof field !== 'string' || !(field in formSchema.shape)) return []
+          const fieldName = field as keyof FormValues
+          form.setError(fieldName, { type: 'server', message: issue.message })
+          return [issue.message]
+        })
+        toast.error('Could not submit request', {
+          id: PUBLIC_FORM_SUBMIT_TOAST_ID,
+          toasterId: PUBLIC_FORM_TOASTER_ID,
+          description: validationMessages?.length
+            ? validationMessages.join(' ')
+            : data.error || 'Failed to submit request. Please try again.',
+          duration: 8000,
         })
       }
     } catch (error) {
-      setResult({
-        success: false,
-        message: `Error: ${error instanceof Error ? error.message : 'Unknown error occurred'}`,
+      console.error('Error submitting form:', error)
+      toast.error('Could not submit request', {
+        id: PUBLIC_FORM_SUBMIT_TOAST_ID,
+        toasterId: PUBLIC_FORM_TOASTER_ID,
+        description: 'Network error. Please try again.',
+        duration: 8000,
       })
     } finally {
       setSubmitting(false)
@@ -212,7 +182,12 @@ export default function PublicFormPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div
+        className={cn(
+          'flex items-center justify-center',
+          isEmbedded ? 'min-h-[420px] bg-background' : 'min-h-screen',
+        )}
+      >
         <div className="text-center">
           <h2 className="text-xl font-semibold mb-2">Loading...</h2>
           <p className="text-gray-600">Please wait while we load the form.</p>
@@ -223,7 +198,12 @@ export default function PublicFormPage() {
 
   if (!formConfig) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div
+        className={cn(
+          'flex items-center justify-center',
+          isEmbedded ? 'min-h-[420px] bg-background px-4' : 'min-h-screen',
+        )}
+      >
         <Card className="w-full max-w-md">
           <CardHeader>
             <CardTitle>Form not found</CardTitle>
@@ -237,18 +217,42 @@ export default function PublicFormPage() {
   }
 
   return (
-    <div className="min-h-screen linear-gradient-bg py-8" style={getBrandingStyles(branding)}>
-      <div className="max-w-2xl mx-auto p-6">
+    <div
+      className={cn(
+        isEmbedded ? 'min-h-full bg-background' : 'min-h-screen linear-gradient-bg py-8',
+      )}
+      style={isEmbedded ? undefined : getBrandingStyles(branding)}
+    >
+      <Toaster
+        id={PUBLIC_FORM_TOASTER_ID}
+        richColors
+        closeButton={!isEmbedded}
+        visibleToasts={1}
+        theme={toastTheme}
+        position={isEmbedded ? 'top-center' : 'bottom-right'}
+        offset={isEmbedded ? 12 : 24}
+        mobileOffset={isEmbedded ? 10 : 16}
+        toastOptions={{
+          classNames: {
+            toast: 'max-w-[calc(100vw-20px)] shadow-lg',
+            title: 'text-sm font-medium',
+            description: 'text-sm leading-5',
+          },
+        }}
+      />
+      <div className={cn('max-w-2xl mx-auto', isEmbedded ? 'p-3 sm:p-4' : 'p-6')}>
         {/* Custom header with logo if branding is set */}
-        {branding && (branding.logo_url || branding.brand_name) && (
+        {!isEmbedded && branding && (branding.logo_url || branding.brand_name) && (
           <div className="mb-6 text-center">
             {branding.logo_url ? (
+              // eslint-disable-next-line @next/next/no-img-element -- user-provided URL, domain not known at build time
               <img
                 src={branding.logo_url}
                 alt={branding.brand_name || 'Logo'}
                 style={{
-                  width: `${branding.logo_width || 120}px`,
-                  height: `${branding.logo_height || 40}px`,
+                  width: 'auto',
+                  height: 'auto',
+                  maxHeight: `${branding.logo_height || 40}px`,
                   objectFit: 'contain',
                 }}
                 className="mx-auto mb-4"
@@ -262,21 +266,24 @@ export default function PublicFormPage() {
           </div>
         )}
 
-        <Card>
-          <CardHeader>
+        <Card className={cn(isEmbedded && 'gap-4 rounded-none border-0 bg-background py-0 shadow-none')}>
+          <CardHeader className={cn(isEmbedded && 'px-0')}>
             <CardTitle>{formConfig.form_title}</CardTitle>
             {formConfig.description && (
               <CardDescription>{formConfig.description}</CardDescription>
             )}
-            {!branding?.brand_name && (
+            {!isEmbedded && !branding?.brand_name && (
               <div className="text-sm text-gray-600">
                 Project: {formConfig.project_name}
               </div>
             )}
           </CardHeader>
-          <CardContent>
+          <CardContent className={cn(isEmbedded && 'px-0')}>
             <Form {...form}>
-              <form onSubmit={form.handleSubmit(onFormSubmit)} className="space-y-6">
+              <form
+                onSubmit={form.handleSubmit(onFormSubmit)}
+                className={cn('space-y-6', isEmbedded && 'space-y-4')}
+              >
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <FormField
                     control={form.control}
@@ -346,10 +353,12 @@ export default function PublicFormPage() {
                     <FormItem>
                       <FormLabel>Description</FormLabel>
                       <FormControl>
-                        <Textarea
+                        <LinearMarkdownEditor
+                          value={field.value}
+                          onChange={field.onChange}
+                          onBlur={field.onBlur}
+                          name={field.name}
                           placeholder="Please provide a detailed description of your issue or request..."
-                          className="min-h-[120px]"
-                          {...field}
                         />
                       </FormControl>
                       <FormMessage />
@@ -380,46 +389,34 @@ export default function PublicFormPage() {
                 </Button>
               </form>
             </Form>
-
-            {result && (
-              <div className={`mt-6 p-4 rounded-lg ${
-                result.success
-                  ? 'bg-green-50 border border-green-200 text-green-800'
-                  : 'bg-red-50 border border-red-200 text-red-800'
-              }`}>
-                <p className="font-medium">
-                  {result.success ? 'Success!' : 'Error'}
-                </p>
-                <p className="text-sm mt-1">{result.message}</p>
-                {result.success && result.data && (
-                  <div className="mt-3 text-xs">
-                    <p><strong>Request ID:</strong> {result.data.request?.id}</p>
-                  </div>
-                )}
-              </div>
-            )}
           </CardContent>
         </Card>
 
-        {/* Custom footer */}
-        <div className="text-center mt-6 text-sm text-gray-500">
-          {branding?.footer_text ? (
-            <p className="whitespace-pre-wrap mb-2">{branding.footer_text}</p>
-          ) : null}
-          {(branding?.show_powered_by !== false) && (
-            <p>
-              {branding?.footer_text ? 'Powered by ' : 'Powered by '}
-              <a
-                href="https://linear.gratis"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-primary hover:underline"
-              >
-                linear.gratis
-              </a>
-            </p>
-          )}
-        </div>
+        {/* Custom footer — skip rendering when there's nothing to show. */}
+        {!isEmbedded && (() => {
+          const showPoweredBy = branding?.show_powered_by !== false
+          if (!branding?.footer_text && !showPoweredBy) return null
+          return (
+            <div className="text-center mt-6 text-sm text-gray-500">
+              {branding?.footer_text ? (
+                <p className="whitespace-pre-wrap mb-2">{branding.footer_text}</p>
+              ) : null}
+              {showPoweredBy && (
+                <p>
+                  Powered by{' '}
+                  <a
+                    href="https://linear.gratis"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary hover:underline"
+                  >
+                    linear.gratis
+                  </a>
+                </p>
+              )}
+            </div>
+          )
+        })()}
       </div>
     </div>
   )

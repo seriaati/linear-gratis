@@ -22,15 +22,23 @@ import {
 } from "@/components/ui/select";
 import { Navigation } from "@/components/navigation";
 import { supabase, CustomerRequestForm } from "@/lib/supabase";
-import { decryptTokenClient } from "@/lib/client-encryption";
+import { getActiveOrganisationId } from "@/lib/organisations";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Trash2, Eye, Copy, Link2 } from "lucide-react";
+import { Trash2, Eye, Copy, Link2, Pencil, Save, X } from "lucide-react";
 
 type Project = {
   id: string;
   name: string;
   description?: string;
+};
+
+type FormDraft = {
+  name: string;
+  slug: string;
+  selectedProject: string;
+  title: string;
+  description: string;
 };
 
 export default function FormsPage() {
@@ -41,7 +49,8 @@ export default function FormsPage() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [showCreateForm, setShowCreateForm] = useState(false);
-  const [linearToken, setLinearToken] = useState<string | null>(null);
+  const [hasLinearToken, setHasLinearToken] = useState(false);
+  const [activeOrgId, setActiveOrgId] = useState<string | null>(null);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -56,19 +65,36 @@ export default function FormsPage() {
   const [selectedProject, setSelectedProject] = useState("");
   const [formTitle, setFormTitle] = useState("");
   const [formDescription, setFormDescription] = useState("");
+  const [editingFormId, setEditingFormId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<FormDraft | null>(null);
+  const [savingFormId, setSavingFormId] = useState<string | null>(null);
+
+  const fetchProjects = useCallback(async () => {
+    try {
+      const response = await fetch("/api/linear/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+
+      if (response.ok) {
+        const data = (await response.json()) as { projects?: Project[] };
+        setProjects(data.projects || []);
+      }
+    } catch (error) {
+      console.error("Failed to fetch projects:", error);
+    }
+  }, []);
 
   const loadUserData = useCallback(async () => {
     if (!user) return;
 
     setLoading(true);
     try {
-      // Load user profile and forms in parallel
-      const [profileResult, formsResult] = await Promise.all([
-        supabase
-          .from("profiles")
-          .select("linear_api_token")
-          .eq("id", user.id)
-          .single(),
+      // Load token status and forms in parallel. The token itself never leaves
+      // the server - we only learn whether one is configured.
+      const [tokenStatusResponse, formsResult] = await Promise.all([
+        fetch("/api/profile/linear-token", { method: "GET" }),
         supabase
           .from("customer_request_forms")
           .select("*")
@@ -76,17 +102,18 @@ export default function FormsPage() {
           .order("created_at", { ascending: false }),
       ]);
 
-      // Handle profile
-      if (profileResult.data?.linear_api_token) {
-        try {
-          const decryptedToken = await decryptTokenClient(
-            profileResult.data.linear_api_token,
-          );
-          setLinearToken(decryptedToken);
-          await fetchProjects(decryptedToken);
-        } catch (error) {
-          console.error("Error decrypting token:", error);
-        }
+      const orgId = await getActiveOrganisationId(supabase, user.id);
+      setActiveOrgId(orgId);
+
+      let tokenConfigured = false;
+      if (tokenStatusResponse.ok) {
+        const data = (await tokenStatusResponse.json()) as { hasToken?: boolean };
+        tokenConfigured = Boolean(data.hasToken);
+      }
+      setHasLinearToken(tokenConfigured);
+
+      if (tokenConfigured) {
+        await fetchProjects();
       }
 
       // Handle forms
@@ -100,7 +127,7 @@ export default function FormsPage() {
     } finally {
       setLoading(false);
     }
-  }, [user]);
+  }, [fetchProjects, user]);
 
   useEffect(() => {
     if (authLoading) return; // Wait for auth to finish loading
@@ -111,23 +138,6 @@ export default function FormsPage() {
     }
     loadUserData();
   }, [user, authLoading, router, loadUserData]);
-
-  const fetchProjects = async (token: string) => {
-    try {
-      const response = await fetch("/api/linear/projects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiToken: token }),
-      });
-
-      if (response.ok) {
-        const data = (await response.json()) as { projects?: Project[] };
-        setProjects(data.projects || []);
-      }
-    } catch (error) {
-      console.error("Failed to fetch projects:", error);
-    }
-  };
 
   const generateSlug = (name: string) => {
     return name
@@ -145,8 +155,102 @@ export default function FormsPage() {
     }
   };
 
+  const updateEditDraft = (patch: Partial<FormDraft>) => {
+    setEditDraft((current) => (current ? { ...current, ...patch } : current));
+  };
+
+  const startEditingForm = (form: CustomerRequestForm) => {
+    const projectId = form.linear_project_id || form.project_id || "";
+
+    setShowCreateForm(false);
+    setShowPrefillOptions(null);
+    setEditingFormId(form.id);
+    setEditDraft({
+      name: form.name,
+      slug: form.slug,
+      selectedProject: projectId,
+      title: form.form_title,
+      description: form.description || "",
+    });
+  };
+
+  const cancelEditingForm = () => {
+    setEditingFormId(null);
+    setEditDraft(null);
+  };
+
+  const handleEditProjectChange = (projectId: string) => {
+    updateEditDraft({ selectedProject: projectId });
+  };
+
+  const saveForm = async () => {
+    if (!user || !editingFormId || !editDraft) return;
+
+    const existingForm = forms.find((form) => form.id === editingFormId);
+    const selectedProjectData = projects.find(
+      (project) => project.id === editDraft.selectedProject,
+    );
+    const projectName =
+      selectedProjectData?.name ||
+      existingForm?.linear_project_name ||
+      existingForm?.project_name;
+
+    if (!editDraft.selectedProject || !projectName) {
+      setMessage({ type: "error", text: "Please select a project" });
+      return;
+    }
+
+    setSavingFormId(editingFormId);
+    setMessage(null);
+
+    try {
+      const { error } = await supabase
+        .from("customer_request_forms")
+        .update({
+          name: editDraft.name,
+          slug: editDraft.slug,
+          project_id: editDraft.selectedProject,
+          linear_project_id: editDraft.selectedProject,
+          project_name: projectName,
+          linear_project_name: projectName,
+          form_title: editDraft.title,
+          description: editDraft.description || null,
+        })
+        .eq("id", editingFormId)
+        .eq("user_id", user.id);
+
+      if (error) {
+        if (error.code === "23505") {
+          setMessage({
+            type: "error",
+            text: "This URL slug is already taken. Please choose a different one.",
+          });
+        } else {
+          setMessage({
+            type: "error",
+            text: "Failed to update form. Please try again.",
+          });
+        }
+        console.error("Error updating form:", error);
+        return;
+      }
+
+      setMessage({ type: "success", text: "Form updated successfully!" });
+      cancelEditingForm();
+      await loadUserData();
+    } catch (error) {
+      setMessage({
+        type: "error",
+        text: "Failed to update form. Please try again.",
+      });
+      console.error("Error updating form:", error);
+    } finally {
+      setSavingFormId(null);
+    }
+  };
+
   const createForm = async () => {
-    if (!user || !linearToken) return;
+    if (!user || !hasLinearToken) return;
 
     setSubmitting(true);
     setMessage(null);
@@ -160,12 +264,34 @@ export default function FormsPage() {
         return;
       }
 
+      if (!activeOrgId) {
+        setMessage({ type: "error", text: "No active organisation. Reload the page and try again." });
+        setSubmitting(false);
+        return;
+      }
+
+      // Resolve the org's Linear connection so the new form is tied to it.
+      // Composite FK on (organisation_id, linear_connection_id) ensures we
+      // can't accidentally write a form pointing at another org's connection.
+      const { data: connection } = await supabase
+        .from("organisation_linear_connections")
+        .select("id")
+        .eq("organisation_id", activeOrgId)
+        .order("connected_at", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
       const { error } = await supabase.from("customer_request_forms").insert({
         user_id: user.id,
+        created_by: user.id,
+        organisation_id: activeOrgId,
+        linear_connection_id: connection?.id ?? null,
         name: formName,
         slug: formSlug,
         project_id: selectedProject,
+        linear_project_id: selectedProject,
         project_name: selectedProjectData.name,
+        linear_project_name: selectedProjectData.name,
         form_title: formTitle,
         description: formDescription || null,
       });
@@ -294,29 +420,6 @@ export default function FormsPage() {
     return <div>Loading...</div>;
   }
 
-  if (!linearToken) {
-    return (
-      <div className="min-h-screen">
-        <Navigation />
-        <div className="max-w-4xl mx-auto p-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Linear API token required</CardTitle>
-              <CardDescription>
-                You need to save your Linear API token before creating forms.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Link href="/profile">
-                <Button>Go to profile settings</Button>
-              </Link>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen">
       <Navigation />
@@ -378,16 +481,27 @@ export default function FormsPage() {
           </div>
 
           <div className="text-center">
-            <Button
-              onClick={() => setShowCreateForm(true)}
-              disabled={projects.length === 0}
-              size="lg"
-              className="h-12 px-8 font-semibold"
-            >
-              {forms.length === 0
-                ? "Create your first form"
-                : "Create new form"}
-            </Button>
+            {hasLinearToken ? (
+              <Button
+                onClick={() => {
+                  cancelEditingForm();
+                  setShowCreateForm(true);
+                }}
+                disabled={!activeOrgId || projects.length === 0}
+                size="lg"
+                className="h-12 px-8 font-semibold"
+              >
+                {forms.length === 0
+                  ? "Create your first form"
+                  : "Create new form"}
+              </Button>
+            ) : (
+              <Link href="/profile">
+                <Button variant="outline" size="lg" className="h-12 px-8 font-semibold">
+                  Set up Linear API token to create forms
+                </Button>
+              </Link>
+            )}
           </div>
         </div>
 
@@ -582,8 +696,11 @@ export default function FormsPage() {
                   submissions.
                 </p>
                 <Button
-                  onClick={() => setShowCreateForm(true)}
-                  disabled={projects.length === 0}
+                  onClick={() => {
+                    cancelEditingForm();
+                    setShowCreateForm(true);
+                  }}
+                  disabled={!activeOrgId || projects.length === 0}
                 >
                   Create your first form
                 </Button>
@@ -600,193 +717,352 @@ export default function FormsPage() {
             </div>
 
             <div className="grid gap-4">
-              {forms.map((form) => (
-                <Card
-                  key={form.id}
-                  className="border-border/50 bg-card/80 backdrop-blur-sm"
-                >
-                  <CardContent>
-                    <div className="flex justify-between items-start">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-3 mb-2">
-                          <h3 className="font-semibold text-lg">{form.name}</h3>
-                          <span className="px-2 py-1 bg-primary/10 text-primary text-xs rounded-full">
-                            {form.project_name}
-                          </span>
-                        </div>
-                        <p className="text-base text-foreground mb-2">
-                          {form.form_title}
-                        </p>
-                        {form.description && (
-                          <p className="text-sm text-muted-foreground mb-3">
-                            {form.description}
-                          </p>
-                        )}
-                        <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                          <span>
-                            Created{" "}
-                            {new Date(form.created_at).toLocaleDateString()}
-                          </span>
-                          <span className="flex items-center gap-1">
-                            <code className="bg-muted px-1 py-0.5 rounded text-xs">
-                              /form/{form.slug}
+              {forms.map((form) => {
+                if (editingFormId === form.id && editDraft) {
+                  const draft = editDraft;
+                  const projectOptions = projects.some(
+                    (project) => project.id === draft.selectedProject,
+                  )
+                    ? projects
+                    : [
+                        {
+                          id: draft.selectedProject,
+                          name: form.linear_project_name || form.project_name,
+                        },
+                        ...projects,
+                      ].filter((project) => project.id);
+                  return (
+                    <Card
+                      key={form.id}
+                      className="border-border/50 bg-card/80 backdrop-blur-sm"
+                    >
+                      <CardContent className="space-y-6">
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                          <div>
+                            <h3 className="text-lg font-semibold">Edit form</h3>
+                            <code className="rounded bg-muted px-1 py-0.5 text-xs text-muted-foreground">
+                              /form/{draft.slug || form.slug}
                             </code>
-                          </span>
+                          </div>
                         </div>
-                      </div>
-                      <div className="flex gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => copyFormLink(form.slug)}
-                          className="flex items-center gap-2"
-                        >
-                          <Copy className="h-4 w-4" />
-                          Copy link
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() =>
-                            setShowPrefillOptions(
-                              showPrefillOptions === form.id ? null : form.id,
-                            )
-                          }
-                          className="flex items-center gap-2"
-                        >
-                          <Link2 className="h-4 w-4" />
-                          Prefill
-                        </Button>
-                        <Link href={`/form/${form.slug}`} target="_blank">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="flex items-center gap-2"
-                          >
-                            <Eye className="h-4 w-4" />
-                            Preview
-                          </Button>
-                        </Link>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => deleteForm(form.id)}
-                          className="text-destructive hover:text-destructive"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    </div>
-                  </CardContent>
-                  {showPrefillOptions === form.id && (
-                    <div className="border-t border-border/50 p-6 bg-muted/30">
-                      <h4 className="font-semibold mb-4">
-                        Create prefilled link
-                      </h4>
-                      <p className="text-sm text-muted-foreground mb-4">
-                        Fill out any fields below to create a shareable link
-                        with prefilled data. Your customers will see these
-                        values when they open the form.
-                      </p>
-                      <form
-                        id={`prefill-form-${form.slug}`}
-                        onSubmit={(e) => {
-                          e.preventDefault();
-                          generatePrefillLink(form.slug, e.currentTarget);
-                        }}
-                        className="space-y-4"
-                      >
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                           <div className="space-y-2">
-                            <Label htmlFor={`name-${form.slug}`}>
-                              Customer name
+                            <Label htmlFor={`edit-form-name-${form.id}`}>
+                              Form name *
                             </Label>
                             <Input
-                              id={`name-${form.slug}`}
-                              name={`name-${form.slug}`}
-                              placeholder="John Doe"
+                              id={`edit-form-name-${form.id}`}
+                              value={draft.name}
+                              onChange={(event) =>
+                                updateEditDraft({ name: event.target.value })
+                              }
                             />
                           </div>
+
                           <div className="space-y-2">
-                            <Label htmlFor={`email-${form.slug}`}>
-                              Email address
+                            <Label htmlFor={`edit-form-slug-${form.id}`}>
+                              URL slug *
                             </Label>
                             <Input
-                              id={`email-${form.slug}`}
-                              name={`email-${form.slug}`}
-                              type="email"
-                              placeholder="john@example.com"
+                              id={`edit-form-slug-${form.id}`}
+                              value={draft.slug}
+                              onChange={(event) =>
+                                updateEditDraft({ slug: event.target.value })
+                              }
                             />
                           </div>
                         </div>
 
-                        <div className="space-y-2">
-                          <Label htmlFor={`ref-${form.slug}`}>
-                            Reference ID
-                          </Label>
-                          <Input
-                            id={`ref-${form.slug}`}
-                            name={`ref-${form.slug}`}
-                            placeholder="TICKET-123"
-                          />
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                          <div className="space-y-2">
+                            <Label htmlFor={`edit-project-${form.id}`}>
+                              Target Linear project *
+                            </Label>
+                            <Select
+                              value={draft.selectedProject}
+                              onValueChange={handleEditProjectChange}
+                            >
+                              <SelectTrigger
+                                id={`edit-project-${form.id}`}
+                                className="w-full"
+                              >
+                                <SelectValue placeholder="Choose a Linear project" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {projectOptions.map((project) => (
+                                  <SelectItem
+                                    key={project.id}
+                                    value={project.id}
+                                  >
+                                    {project.name}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
                         </div>
 
-                        <div className="space-y-2">
-                          <Label htmlFor={`title-${form.slug}`}>
-                            Issue title
-                          </Label>
-                          <Input
-                            id={`title-${form.slug}`}
-                            name={`title-${form.slug}`}
-                            placeholder="Brief description of the issue"
-                          />
+                        <div className="space-y-4">
+                          <div className="space-y-2">
+                            <Label htmlFor={`edit-form-title-${form.id}`}>
+                              Form title *
+                            </Label>
+                            <Input
+                              id={`edit-form-title-${form.id}`}
+                              value={draft.title}
+                              onChange={(event) =>
+                                updateEditDraft({ title: event.target.value })
+                              }
+                            />
+                          </div>
+
+                          <div className="space-y-2">
+                            <Label htmlFor={`edit-form-description-${form.id}`}>
+                              Instructions (optional)
+                            </Label>
+                            <Textarea
+                              id={`edit-form-description-${form.id}`}
+                              value={draft.description}
+                              onChange={(event) =>
+                                updateEditDraft({
+                                  description: event.target.value,
+                                })
+                              }
+                              rows={3}
+                            />
+                          </div>
                         </div>
 
-                        <div className="space-y-2">
-                          <Label htmlFor={`body-${form.slug}`}>
-                            Issue description
-                          </Label>
-                          <Textarea
-                            id={`body-${form.slug}`}
-                            name={`body-${form.slug}`}
-                            placeholder="Detailed description of the issue..."
-                            rows={3}
-                          />
-                        </div>
-
-                        <div className="space-y-2">
-                          <Label htmlFor={`attachment-${form.slug}`}>
-                            Attachment URL
-                          </Label>
-                          <Input
-                            id={`attachment-${form.slug}`}
-                            name={`attachment-${form.slug}`}
-                            type="url"
-                            placeholder="https://example.com/screenshot.png"
-                          />
-                        </div>
-
-                        <div className="flex gap-3 pt-4">
+                        <div className="flex flex-wrap gap-3 border-t pt-4">
                           <Button
-                            type="submit"
+                            onClick={saveForm}
+                            disabled={
+                              savingFormId === form.id ||
+                              !draft.name ||
+                              !draft.slug ||
+                              !draft.selectedProject ||
+                              !draft.title
+                            }
                             className="flex items-center gap-2"
                           >
-                            <Copy className="h-4 w-4" />
-                            Copy prefilled link
+                            <Save className="h-4 w-4" />
+                            {savingFormId === form.id
+                              ? "Saving..."
+                              : "Save changes"}
                           </Button>
                           <Button
-                            type="button"
                             variant="outline"
-                            onClick={() => setShowPrefillOptions(null)}
+                            onClick={cancelEditingForm}
+                            className="flex items-center gap-2"
                           >
+                            <X className="h-4 w-4" />
                             Cancel
                           </Button>
                         </div>
-                      </form>
-                    </div>
-                  )}
-                </Card>
-              ))}
+                      </CardContent>
+                    </Card>
+                  );
+                }
+
+                return (
+                  <Card
+                    key={form.id}
+                    className="border-border/50 bg-card/80 backdrop-blur-sm"
+                  >
+                    <CardContent>
+                      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                        <div className="min-w-0 flex-1">
+                          <div className="mb-2 flex flex-wrap items-center gap-3">
+                            <h3 className="text-lg font-semibold">{form.name}</h3>
+                            <span className="rounded-full bg-primary/10 px-2 py-1 text-xs text-primary">
+                              {form.linear_project_name || form.project_name}
+                            </span>
+                          </div>
+                          <p className="mb-2 text-base text-foreground">
+                            {form.form_title}
+                          </p>
+                          {form.description && (
+                            <p className="mb-3 text-sm text-muted-foreground">
+                              {form.description}
+                            </p>
+                          )}
+                          <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
+                            <span>
+                              Created{" "}
+                              {new Date(form.created_at).toLocaleDateString()}
+                            </span>
+                            <span className="flex items-center gap-1">
+                              <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                                /form/{form.slug}
+                              </code>
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => startEditingForm(form)}
+                            className="flex items-center gap-2"
+                          >
+                            <Pencil className="h-4 w-4" />
+                            Edit
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => copyFormLink(form.slug)}
+                            className="flex items-center gap-2"
+                          >
+                            <Copy className="h-4 w-4" />
+                            Copy link
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              setShowPrefillOptions(
+                                showPrefillOptions === form.id ? null : form.id,
+                              )
+                            }
+                            className="flex items-center gap-2"
+                          >
+                            <Link2 className="h-4 w-4" />
+                            Prefill
+                          </Button>
+                          <Link href={`/form/${form.slug}`} target="_blank">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="flex items-center gap-2"
+                            >
+                              <Eye className="h-4 w-4" />
+                              Preview
+                            </Button>
+                          </Link>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => deleteForm(form.id)}
+                            className="text-destructive hover:text-destructive"
+                            aria-label={`Delete ${form.name}`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    </CardContent>
+                    {showPrefillOptions === form.id && (
+                      <div className="border-t border-border/50 bg-muted/30 p-6">
+                        <h4 className="mb-4 font-semibold">
+                          Create prefilled link
+                        </h4>
+                        <p className="mb-4 text-sm text-muted-foreground">
+                          Fill out any fields below to create a shareable link
+                          with prefilled data. Your customers will see these
+                          values when they open the form.
+                        </p>
+                        <form
+                          id={`prefill-form-${form.slug}`}
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            generatePrefillLink(form.slug, e.currentTarget);
+                          }}
+                          className="space-y-4"
+                        >
+                          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                            <div className="space-y-2">
+                              <Label htmlFor={`name-${form.slug}`}>
+                                Customer name
+                              </Label>
+                              <Input
+                                id={`name-${form.slug}`}
+                                name={`name-${form.slug}`}
+                                placeholder="John Doe"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor={`email-${form.slug}`}>
+                                Email address
+                              </Label>
+                              <Input
+                                id={`email-${form.slug}`}
+                                name={`email-${form.slug}`}
+                                type="email"
+                                placeholder="john@example.com"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="space-y-2">
+                            <Label htmlFor={`ref-${form.slug}`}>
+                              Reference ID
+                            </Label>
+                            <Input
+                              id={`ref-${form.slug}`}
+                              name={`ref-${form.slug}`}
+                              placeholder="TICKET-123"
+                            />
+                          </div>
+
+                          <div className="space-y-2">
+                            <Label htmlFor={`title-${form.slug}`}>
+                              Issue title
+                            </Label>
+                            <Input
+                              id={`title-${form.slug}`}
+                              name={`title-${form.slug}`}
+                              placeholder="Brief description of the issue"
+                            />
+                          </div>
+
+                          <div className="space-y-2">
+                            <Label htmlFor={`body-${form.slug}`}>
+                              Issue description
+                            </Label>
+                            <Textarea
+                              id={`body-${form.slug}`}
+                              name={`body-${form.slug}`}
+                              placeholder="Detailed description of the issue..."
+                              rows={3}
+                            />
+                          </div>
+
+                          <div className="space-y-2">
+                            <Label htmlFor={`attachment-${form.slug}`}>
+                              Attachment URL
+                            </Label>
+                            <Input
+                              id={`attachment-${form.slug}`}
+                              name={`attachment-${form.slug}`}
+                              type="url"
+                              placeholder="https://example.com/screenshot.png"
+                            />
+                          </div>
+
+                          <div className="flex gap-3 pt-4">
+                            <Button
+                              type="submit"
+                              className="flex items-center gap-2"
+                            >
+                              <Copy className="h-4 w-4" />
+                              Copy prefilled link
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={() => setShowPrefillOptions(null)}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </form>
+                      </div>
+                    )}
+                  </Card>
+                );
+              })}
             </div>
           </div>
         )}

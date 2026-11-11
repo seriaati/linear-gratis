@@ -1,4 +1,6 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
+import { paginateLinearConnection, type LinearConnection } from '@/lib/linear';
+import { getAuthenticatedLinearToken } from '@/lib/linear-auth';
 
 export type Team = {
   id: string
@@ -7,84 +9,52 @@ export type Team = {
   description?: string
 }
 
-export async function POST(request: NextRequest) {
+type TeamNode = Team;
+
+export async function POST() {
   try {
-    const { apiToken } = await request.json() as { apiToken: string };
+    const auth = await getAuthenticatedLinearToken();
+    if (!auth.ok) return auth.response;
+    const { linearToken } = auth;
 
-    if (!apiToken) {
-      return NextResponse.json(
-        { error: 'Missing required field: apiToken' },
-        { status: 400 }
-      );
-    }
-
-    console.log('Teams API - Token length:', apiToken.length, 'First 20 chars:', apiToken.substring(0, 20));
-
-    // Get teams from Linear using GraphQL
     const query = `
-      query Teams {
-        teams {
+      query Teams($after: String) {
+        teams(first: 250, after: $after) {
           nodes {
             id
             name
             key
             description
           }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
         }
       }
     `;
 
-    const response = await fetch('https://api.linear.app/graphql', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': apiToken.trim()
-      },
-      body: JSON.stringify({ query })
+    const result = await paginateLinearConnection<TeamNode>({
+      apiToken: linearToken,
+      query,
+      extract: (data) =>
+        (data as { teams: LinearConnection<TeamNode> }).teams,
     });
 
-    if (!response.ok) {
-      let errorDetails = '';
-      try {
-        const errorBody = await response.text();
-        errorDetails = ` - ${errorBody}`;
-      } catch {
-        // Ignore text parsing errors
-      }
-      throw new Error(`Linear API error: ${response.status} ${response.statusText}${errorDetails}`);
+    if (!result.success) {
+      throw new Error(result.error);
     }
 
-    const result = await response.json() as {
-      data?: {
-        teams: {
-          nodes: Array<{
-            id: string
-            name: string
-            key: string
-            description?: string
-          }>
-        }
-      }
-      errors?: Array<{ message: string }>
-    };
-
-    if (result.errors) {
-      throw new Error(`GraphQL errors: ${result.errors.map(e => e.message).join(', ')}`);
-    }
-
-    if (!result.data) {
-      throw new Error('No data returned from Linear API');
-    }
-
-    return NextResponse.json({
-      success: true,
-      teams: result.data.teams.nodes.map(team => ({
+    const teams = result.nodes
+      .map(team => ({
         id: team.id,
         name: team.name,
         key: team.key,
         description: team.description
       }))
-    });
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+
+    return NextResponse.json({ success: true, teams });
 
   } catch (error) {
     console.error('Teams API error:', error);

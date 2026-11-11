@@ -10,14 +10,15 @@ export async function GET(request: NextRequest) {
     if (!domain) {
       return NextResponse.json({ error: 'Domain parameter is required' }, { status: 400 });
     }
+    const normalizedDomain = domain.trim().toLowerCase();
 
-    // Look up the domain
+    // Look up the domain. Only expose the fields the middleware needs for
+    // routing; never leak user_id, cloudflare_hostname_id, verification_token
+    // or dns_records to anonymous callers.
     const { data, error } = await supabase
-      .from('custom_domains')
-      .select('*')
-      .eq('domain', domain)
-      .eq('verification_status', 'verified')
-      .eq('is_active', true)
+      .from('public_custom_domain_routes')
+      .select('target_type, target_slug, redirect_to_https')
+      .eq('domain', normalizedDomain)
       .single();
 
     if (error) {

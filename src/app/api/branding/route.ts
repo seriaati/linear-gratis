@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { supabaseAdmin } from '@/lib/supabase';
+import { getActiveOrganisationIdAdmin } from '@/lib/organisations';
 
 interface BrandingSettings {
   logo_url?: string | null;
-  logo_width?: number | null;
   logo_height?: number | null;
   favicon_url?: string | null;
   brand_name?: string | null;
@@ -86,7 +86,6 @@ export async function POST(request: NextRequest) {
         .from('branding_settings')
         .update({
           logo_url: normalise(body.logo_url),
-          logo_width: normalise(body.logo_width),
           logo_height: normalise(body.logo_height),
           favicon_url: normalise(body.favicon_url),
           brand_name: normalise(body.brand_name),
@@ -109,13 +108,20 @@ export async function POST(request: NextRequest) {
         .select()
         .single();
     } else {
+      const organisationId = await getActiveOrganisationIdAdmin(supabaseAdmin, user.id);
+      if (!organisationId) {
+        return NextResponse.json(
+          { error: 'No active organisation for this user' },
+          { status: 500 }
+        );
+      }
       // Create new settings
       result = await supabaseAdmin
         .from('branding_settings')
         .insert({
           user_id: user.id,
+          organisation_id: organisationId,
           logo_url: normalise(body.logo_url),
-          logo_width: normalise(body.logo_width),
           logo_height: normalise(body.logo_height),
           favicon_url: normalise(body.favicon_url),
           brand_name: normalise(body.brand_name),

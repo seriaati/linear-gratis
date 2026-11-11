@@ -1,3 +1,4 @@
+import { Github } from "@/components/icons/github";
 import { Metadata } from 'next'
 import { notFound } from 'next/navigation'
 import Link from 'next/link'
@@ -10,7 +11,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Check, ArrowRight, Star, Github, Heart, Users, Target, Workflow, Zap } from 'lucide-react'
+import { Check, ArrowRight, Star, Heart, Users, Target, Workflow, Zap } from 'lucide-react'
 
 interface UseCasePageProps {
   params: Promise<{
@@ -34,7 +35,7 @@ export async function generateMetadata({ params }: UseCasePageProps): Promise<Me
     }
   }
 
-  const seoData = generateUseCaseMetadata(useCase.name)
+  const seoData = generateUseCaseMetadata(useCase.name, useCase.slug)
   return createMetadata(seoData)
 }
 

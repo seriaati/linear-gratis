@@ -1,39 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
 import type { IssueFormQuestion } from '@/lib/supabase';
+import { authorisePublicView } from '@/lib/public-view-auth';
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ slug: string }> }
 ) {
   try {
     const { slug } = await params;
-
-    if (!slug) {
-      return NextResponse.json({ error: 'Slug parameter is required' }, { status: 400 });
-    }
-
-    // Fetch the view to get enabled_issue_form_ids
-    const { data: viewData, error: viewError } = await supabaseAdmin
-      .from('public_views')
-      .select('allow_issue_creation, enabled_issue_form_ids')
-      .eq('slug', slug)
-      .eq('is_active', true)
-      .single();
-
-    if (viewError || !viewData) {
-      return NextResponse.json({ error: 'View not found' }, { status: 404 });
-    }
+    const auth = await authorisePublicView(slug, request);
+    if (!auth.ok) return auth.response;
+    const viewData = auth.view;
 
     if (!viewData.allow_issue_creation || !viewData.enabled_issue_form_ids?.length) {
       return NextResponse.json({ success: true, forms: [] });
     }
 
-    // Fetch the enabled issue forms — stale UUIDs are silently ignored by .in()
+    // Stale UUIDs are silently ignored by .in(); the organisation filter stops a
+    // view from exposing another organisation's forms.
     const { data: forms, error: formsError } = await supabaseAdmin
       .from('issue_forms')
       .select('id, name, questions')
-      .in('id', viewData.enabled_issue_form_ids);
+      .in('id', viewData.enabled_issue_form_ids)
+      .eq('organisation_id', viewData.organisation_id);
 
     if (formsError) {
       throw formsError;
@@ -54,7 +44,7 @@ export async function GET(
   } catch (error) {
     console.error('Public view issue-forms GET error:', error);
     return NextResponse.json(
-      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      { success: false, error: 'Failed to load issue forms' },
       { status: 500 }
     );
   }

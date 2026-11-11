@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useAuth } from "@/contexts/auth-context";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,13 +21,27 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Navigation } from "@/components/navigation";
 import { supabase, PublicView } from "@/lib/supabase";
 import type { IssueForm } from "@/lib/supabase";
-import { decryptTokenClient } from "@/lib/client-encryption";
+import { getActiveOrganisationId } from "@/lib/organisations";
+import { cn } from "@/lib/utils";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Trash2, Eye, Copy, Globe, Lock, Edit3 } from "lucide-react";
+import { Check, ChevronsUpDown, Trash2, Eye, Copy, Globe, Lock, Edit3, X } from "lucide-react";
 import bcrypt from "bcryptjs";
 
 type Project = {
@@ -43,6 +57,95 @@ type Team = {
   description?: string;
 };
 
+type LinearLabel = {
+  id: string;
+  name: string;
+  color: string;
+};
+
+type SourceComboboxOption = {
+  id: string;
+  label: string;
+  description?: string;
+  searchText?: string;
+};
+
+type SourceComboboxProps = {
+  id: string;
+  value: string;
+  options: SourceComboboxOption[];
+  placeholder: string;
+  searchPlaceholder: string;
+  emptyMessage: string;
+  onValueChange: (value: string) => void;
+};
+
+function SourceCombobox({
+  id,
+  value,
+  options,
+  placeholder,
+  searchPlaceholder,
+  emptyMessage,
+  onValueChange,
+}: SourceComboboxProps) {
+  const [open, setOpen] = useState(false);
+  const selectedOption = options.find((option) => option.id === value);
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          id={id}
+          variant="outline"
+          role="combobox"
+          aria-expanded={open}
+          className="w-full justify-between"
+        >
+          <span className={cn("truncate", !selectedOption && "text-muted-foreground")}>
+            {selectedOption ? selectedOption.label : placeholder}
+          </span>
+          <ChevronsUpDown data-icon="inline-end" className="opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] p-0">
+        <Command>
+          <CommandInput placeholder={searchPlaceholder} />
+          <CommandList>
+            <CommandEmpty>{emptyMessage}</CommandEmpty>
+            <CommandGroup>
+              {options.map((option) => (
+                <CommandItem
+                  key={option.id}
+                  value={`${option.label} ${option.description ?? ""} ${option.searchText ?? ""} ${option.id}`}
+                  onSelect={() => {
+                    onValueChange(option.id);
+                    setOpen(false);
+                  }}
+                >
+                  <Check
+                    data-icon="inline-start"
+                    className={cn(
+                      "opacity-0",
+                      value === option.id && "opacity-100",
+                    )}
+                  />
+                  <span className="truncate">{option.label}</span>
+                  {option.description ? (
+                    <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                      {option.description}
+                    </span>
+                  ) : null}
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export default function PublicViewsPage() {
   const { user, loading: authLoading } = useAuth();
   const router = useRouter();
@@ -52,7 +155,8 @@ export default function PublicViewsPage() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [showCreateView, setShowCreateView] = useState(false);
-  const [linearToken, setLinearToken] = useState<string | null>(null);
+  const [hasLinearToken, setHasLinearToken] = useState(false);
+  const [activeOrgId, setActiveOrgId] = useState<string | null>(null);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -76,44 +180,146 @@ export default function PublicViewsPage() {
   const [hiddenStatuses, setHiddenStatuses] = useState<string[]>([]);
   const [issueForms, setIssueForms] = useState<IssueForm[]>([]);
   const [enabledIssueFormIds, setEnabledIssueFormIds] = useState<string[]>([]);
+  const [showComments, setShowComments] = useState(false);
+  const [showActivity, setShowActivity] = useState(false);
+  const [showProjectUpdates, setShowProjectUpdates] = useState(true);
+  const [excludedIssueIds, setExcludedIssueIds] = useState<string[]>([]);
+  const [allowedLabelIds, setAllowedLabelIds] = useState<string[]>([]);
+  const [availableLabels, setAvailableLabels] = useState<LinearLabel[]>([]);
+  const [loadingLabels, setLoadingLabels] = useState(false);
+  const [availableIssues, setAvailableIssues] = useState<Array<{ id: string; identifier: string; title: string }>>([]);
+  const [loadingIssues, setLoadingIssues] = useState(false);
+  const [issueFilter, setIssueFilter] = useState("");
+
+  const EXCLUDED_PICKER_LIMIT = 200;
+
+  const filteredPickerIssues = useMemo(() => {
+    if (!issueFilter) return availableIssues;
+    const q = issueFilter.toLowerCase();
+    return availableIssues.filter(
+      (issue) =>
+        issue.identifier.toLowerCase().includes(q) ||
+        issue.title.toLowerCase().includes(q),
+    );
+  }, [availableIssues, issueFilter]);
+
+  const visiblePickerIssues = useMemo(
+    () => filteredPickerIssues.slice(0, EXCLUDED_PICKER_LIMIT),
+    [filteredPickerIssues],
+  );
+  const hiddenPickerCount = filteredPickerIssues.length - visiblePickerIssues.length;
+  const projectOptions = useMemo<SourceComboboxOption[]>(
+    () =>
+      projects.map((project) => ({
+        id: project.id,
+        label: project.name,
+        searchText: project.description,
+      })),
+    [projects],
+  );
+  const teamOptions = useMemo<SourceComboboxOption[]>(
+    () =>
+      teams.map((team) => ({
+        id: team.id,
+        label: team.name,
+        description: team.key,
+        searchText: team.description,
+      })),
+    [teams],
+  );
+
+  const toggleExcludeIssue = useCallback((issueId: string) => {
+    setExcludedIssueIds((prev) =>
+      prev.includes(issueId)
+        ? prev.filter((id) => id !== issueId)
+        : [...prev, issueId],
+    );
+  }, []);
+
+  const toggleAllowedLabel = useCallback((labelId: string) => {
+    setAllowedLabelIds((prev) =>
+      prev.includes(labelId)
+        ? prev.filter((id) => id !== labelId)
+        : [...prev, labelId],
+    );
+  }, []);
+
+  const resetSourceScopedSelections = useCallback(() => {
+    setAllowedLabelIds([]);
+    setAvailableLabels([]);
+    setHiddenStatuses([]);
+    setAvailableStatuses([]);
+    setExcludedIssueIds([]);
+    setAvailableIssues([]);
+    setIssueFilter("");
+  }, []);
+
+  const handleSourceTypeChange = useCallback(
+    (value: string) => {
+      const nextSourceType = value as "project" | "team";
+      if (nextSourceType === sourceType) return;
+
+      setSourceType(nextSourceType);
+      setSelectedProject("");
+      setSelectedTeam("");
+      resetSourceScopedSelections();
+    },
+    [resetSourceScopedSelections, sourceType],
+  );
+
+  const handleProjectChange = useCallback(
+    (projectId: string) => {
+      setSelectedProject(projectId);
+      setSelectedTeam("");
+      resetSourceScopedSelections();
+    },
+    [resetSourceScopedSelections],
+  );
+
+  const handleTeamChange = useCallback(
+    (teamId: string) => {
+      setSelectedTeam(teamId);
+      setSelectedProject("");
+      resetSourceScopedSelections();
+    },
+    [resetSourceScopedSelections],
+  );
 
   const loadUserData = useCallback(async () => {
     if (!user) return;
 
     setLoading(true);
     try {
-      // Load user profile, views, and issue forms in parallel
+      // Load token status, views and issue forms in parallel. The token itself
+      // never leaves the server - we only learn whether one is configured.
       const { data: { session } } = await supabase.auth.getSession();
-      const [profileResult, viewsResult, issueFormsResult] = await Promise.all([
-        supabase
-          .from("profiles")
-          .select("linear_api_token")
-          .eq("id", user.id)
-          .single(),
+      const [tokenStatusResponse, viewsResult, issueFormsResult] = await Promise.all([
+        fetch("/api/profile/linear-token", { method: "GET" }),
         supabase
           .from("public_views")
           .select("*")
-          .eq("user_id", user.id)
           .order("created_at", { ascending: false }),
         fetch("/api/issue-forms", {
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }).then((r) => r.json() as Promise<{ success?: boolean; issueForms?: IssueForm[] }>),
       ]);
 
-      // Handle profile
-      if (profileResult.data?.linear_api_token) {
-        try {
-          const decryptedToken = await decryptTokenClient(
-            profileResult.data.linear_api_token,
-          );
-          setLinearToken(decryptedToken);
-          await Promise.all([
-            fetchProjects(decryptedToken),
-            fetchTeams(decryptedToken),
-          ]);
-        } catch (error) {
-          console.error("Error decrypting token:", error);
-        }
+      if (issueFormsResult.success && issueFormsResult.issueForms) {
+        setIssueForms(issueFormsResult.issueForms);
+      }
+
+      const orgId = await getActiveOrganisationId(supabase, user.id);
+      setActiveOrgId(orgId);
+
+      let tokenConfigured = false;
+      if (tokenStatusResponse.ok) {
+        const data = (await tokenStatusResponse.json()) as { hasToken?: boolean };
+        tokenConfigured = Boolean(data.hasToken);
+      }
+      setHasLinearToken(tokenConfigured);
+
+      if (tokenConfigured) {
+        await Promise.all([fetchProjects(), fetchTeams()]);
       }
 
       // Handle views
@@ -121,11 +327,6 @@ export default function PublicViewsPage() {
         console.error("Error loading views:", viewsResult.error);
       } else {
         setViews(viewsResult.data || []);
-      }
-
-      // Handle issue forms
-      if (issueFormsResult.success && issueFormsResult.issueForms) {
-        setIssueForms(issueFormsResult.issueForms);
       }
     } catch (error) {
       console.error("Error loading data:", error);
@@ -144,12 +345,12 @@ export default function PublicViewsPage() {
     loadUserData();
   }, [user, authLoading, router, loadUserData]);
 
-  const fetchProjects = async (token: string) => {
+  const fetchProjects = async () => {
     try {
       const response = await fetch("/api/linear/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiToken: token }),
+        body: JSON.stringify({}),
       });
 
       if (response.ok) {
@@ -161,12 +362,12 @@ export default function PublicViewsPage() {
     }
   };
 
-  const fetchTeams = async (token: string) => {
+  const fetchTeams = async () => {
     try {
       const response = await fetch("/api/linear/teams", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiToken: token }),
+        body: JSON.stringify({}),
       });
 
       if (response.ok) {
@@ -175,31 +376,6 @@ export default function PublicViewsPage() {
       }
     } catch (error) {
       console.error("Failed to fetch teams:", error);
-    }
-  };
-
-  const fetchStatuses = async (token: string, projectId?: string, teamId?: string) => {
-    if (!projectId && !teamId) {
-      setAvailableStatuses([]);
-      return;
-    }
-    try {
-      const response = await fetch("/api/linear/metadata", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          apiToken: token,
-          ...(projectId ? { projectId } : { teamId }),
-        }),
-      });
-      if (response.ok) {
-        const data = (await response.json()) as {
-          metadata?: { states?: { id: string; name: string; color: string; type: string }[] };
-        };
-        setAvailableStatuses(data.metadata?.states ?? []);
-      }
-    } catch (error) {
-      console.error("Failed to fetch statuses:", error);
     }
   };
 
@@ -220,7 +396,7 @@ export default function PublicViewsPage() {
   };
 
   const createView = async () => {
-    if (!user || !linearToken) return;
+    if (!user || !hasLinearToken) return;
 
     setSubmitting(true);
     setMessage(null);
@@ -267,8 +443,25 @@ export default function PublicViewsPage() {
         passwordHash = await bcrypt.hash(password, 12);
       }
 
+      if (!activeOrgId) {
+        setMessage({ type: "error", text: "No active organisation. Reload the page and try again." });
+        setSubmitting(false);
+        return;
+      }
+
+      const { data: connection } = await supabase
+        .from("organisation_linear_connections")
+        .select("id")
+        .eq("organisation_id", activeOrgId)
+        .order("connected_at", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
       const { error } = await supabase.from("public_views").insert({
         user_id: user.id,
+        created_by: user.id,
+        organisation_id: activeOrgId,
+        linear_connection_id: connection?.id ?? null,
         name: viewName,
         slug: viewSlug,
         view_title: viewTitle,
@@ -278,13 +471,19 @@ export default function PublicViewsPage() {
         show_priorities: true,
         show_descriptions: true,
         allowed_statuses: [],
-        hidden_statuses: hiddenStatuses,
         password_protected: passwordProtected,
         password_hash: passwordHash,
         is_active: true,
         allow_issue_creation: allowIssueCreation,
         allow_image_uploads: allowImageUploads,
         enabled_issue_form_ids: enabledIssueFormIds,
+        hidden_statuses: hiddenStatuses,
+        show_comments: showComments,
+        show_activity: showActivity,
+        show_project_updates: showProjectUpdates,
+        excluded_issue_ids: excludedIssueIds,
+        excluded_linear_issue_ids: excludedIssueIds,
+        allowed_label_ids: allowedLabelIds,
         ...sourceData,
       });
 
@@ -355,16 +554,6 @@ export default function PublicViewsPage() {
     setTimeout(() => setMessage(null), 3000);
   };
 
-  const handleSelectProject = (value: string) => {
-    setSelectedProject(value);
-    if (linearToken) fetchStatuses(linearToken, value, undefined);
-  };
-
-  const handleSelectTeam = (value: string) => {
-    setSelectedTeam(value);
-    if (linearToken) fetchStatuses(linearToken, undefined, value);
-  };
-
   const resetForm = () => {
     setViewName("");
     setViewSlug("");
@@ -380,10 +569,124 @@ export default function PublicViewsPage() {
     setHiddenStatuses([]);
     setAvailableStatuses([]);
     setEnabledIssueFormIds([]);
+    setShowComments(false);
+    setShowActivity(false);
+    setShowProjectUpdates(true);
+    setExcludedIssueIds([]);
+    setAllowedLabelIds([]);
+    setAvailableLabels([]);
+    setLoadingLabels(false);
+    setAvailableIssues([]);
+    setIssueFilter("");
     setShowCreateView(false);
     setEditingView(null);
     setShowEditView(false);
   };
+
+  const fetchSourceLabels = useCallback(
+    async (sourceProjectId?: string, sourceTeamId?: string) => {
+      if (!hasLinearToken || (!sourceProjectId && !sourceTeamId)) {
+        setAvailableLabels([]);
+        setAvailableStatuses([]);
+        return;
+      }
+
+      setLoadingLabels(true);
+      try {
+        const response = await fetch("/api/linear/metadata", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            projectId: sourceProjectId || undefined,
+            teamId: sourceTeamId || undefined,
+          }),
+        });
+
+        if (response.ok) {
+          const data = (await response.json()) as {
+            metadata?: {
+              labels?: LinearLabel[];
+              states?: { id: string; name: string; color: string; type: string }[];
+            };
+          };
+          const labels = data.metadata?.labels ?? [];
+          setAvailableLabels(labels);
+          setAvailableStatuses(data.metadata?.states ?? []);
+        } else {
+          setAvailableLabels([]);
+          setAvailableStatuses([]);
+        }
+      } catch (error) {
+        console.error("Failed to fetch labels for view filter:", error);
+        setAvailableLabels([]);
+        setAvailableStatuses([]);
+      } finally {
+        setLoadingLabels(false);
+      }
+    },
+    [hasLinearToken],
+  );
+
+  const fetchPickerIssues = useCallback(
+    async (sourceProjectId?: string, sourceTeamId?: string) => {
+      if (!hasLinearToken || (!sourceProjectId && !sourceTeamId)) return;
+
+      setLoadingIssues(true);
+      try {
+        const response = await fetch("/api/linear/issues", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            projectId: sourceProjectId || undefined,
+            teamId: sourceTeamId || undefined,
+          }),
+        });
+
+        if (response.ok) {
+          const data = (await response.json()) as {
+            issues?: Array<{ id: string; identifier: string; title: string }>;
+          };
+          setAvailableIssues(data.issues ?? []);
+        }
+      } catch (error) {
+        console.error("Failed to fetch issues for exclusion picker:", error);
+      } finally {
+        setLoadingIssues(false);
+      }
+    },
+    [hasLinearToken],
+  );
+
+  useEffect(() => {
+    if (!showCreateView && !showEditView) return;
+
+    const sourceProjectId = sourceType === "project" ? selectedProject : undefined;
+    const sourceTeamId = sourceType === "team" ? selectedTeam : undefined;
+
+    if (!sourceProjectId && !sourceTeamId) {
+      setAvailableLabels([]);
+      setAvailableStatuses([]);
+      setLoadingLabels(false);
+      if (showEditView) {
+        setAvailableIssues([]);
+        setLoadingIssues(false);
+      }
+      return;
+    }
+
+    fetchSourceLabels(sourceProjectId, sourceTeamId);
+    if (showEditView) {
+      fetchPickerIssues(sourceProjectId, sourceTeamId);
+    }
+  }, [
+    fetchPickerIssues,
+    fetchSourceLabels,
+    selectedProject,
+    selectedTeam,
+    showCreateView,
+    showEditView,
+    sourceType,
+  ]);
 
   const startEditView = (view: PublicView) => {
     setEditingView(view);
@@ -397,24 +700,29 @@ export default function PublicViewsPage() {
     setAllowImageUploads(view.allow_image_uploads || false);
     setHiddenStatuses(view.hidden_statuses ?? []);
     setEnabledIssueFormIds(view.enabled_issue_form_ids ?? []);
+    setShowComments(view.show_comments ?? false);
+    setShowActivity(view.show_activity ?? false);
+    setShowProjectUpdates(view.show_project_updates ?? true);
+    setExcludedIssueIds(view.excluded_issue_ids ?? []);
+    setAllowedLabelIds(view.allowed_label_ids ?? []);
+    setAvailableLabels([]);
+    setAvailableIssues([]);
+    setIssueFilter("");
 
     // Set source type and selection based on existing view
     if (view.project_id) {
       setSourceType("project");
       setSelectedProject(view.project_id);
       setSelectedTeam("");
-      if (linearToken) fetchStatuses(linearToken, view.project_id, undefined);
     } else if (view.team_id) {
       setSourceType("team");
       setSelectedTeam(view.team_id);
       setSelectedProject("");
-      if (linearToken) fetchStatuses(linearToken, undefined, view.team_id);
     } else {
       // No project or team set - default to project
       setSourceType("project");
       setSelectedProject("");
       setSelectedTeam("");
-      setAvailableStatuses([]);
     }
 
     setShowEditView(true);
@@ -484,6 +792,12 @@ export default function PublicViewsPage() {
           allow_image_uploads: allowImageUploads,
           enabled_issue_form_ids: enabledIssueFormIds,
           hidden_statuses: hiddenStatuses,
+          show_comments: showComments,
+          show_activity: showActivity,
+          show_project_updates: showProjectUpdates,
+          excluded_issue_ids: excludedIssueIds,
+          excluded_linear_issue_ids: excludedIssueIds,
+          allowed_label_ids: allowedLabelIds,
           ...sourceData,
         })
         .eq("id", editingView.id);
@@ -510,36 +824,210 @@ export default function PublicViewsPage() {
     }
   };
 
+  const renderHiddenStatusesSection = () => {
+    if (availableStatuses.length === 0) return null;
+
+    return (
+      <div className="space-y-2">
+        <Label>Hide statuses from public view</Label>
+        <p className="text-xs text-muted-foreground">
+          Issues with these statuses will not appear in the public view
+        </p>
+        <div className="flex flex-wrap gap-2 pt-1">
+          {availableStatuses.map((status) => {
+            const isHidden = hiddenStatuses.includes(status.name);
+            return (
+              <button
+                key={status.id}
+                type="button"
+                onClick={() =>
+                  setHiddenStatuses((prev) =>
+                    isHidden
+                      ? prev.filter((s) => s !== status.name)
+                      : [...prev, status.name]
+                  )
+                }
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                  isHidden
+                    ? "border-destructive/50 bg-destructive/10 text-destructive line-through"
+                    : "border-border bg-background text-foreground hover:bg-accent"
+                }`}
+              >
+                <span
+                  className="w-2 h-2 rounded-full flex-shrink-0"
+                  style={{ backgroundColor: status.color }}
+                />
+                {status.name}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  const renderImageUploadOption = () => {
+    if (!allowIssueCreation) return null;
+
+    return (
+      <div className="flex items-start space-x-3">
+        <div className="flex-shrink-0 mt-0.5">
+          <Checkbox
+            checked={allowImageUploads}
+            onChange={() => setAllowImageUploads(!allowImageUploads)}
+          />
+        </div>
+        <div className="flex-1">
+          <Label className="text-sm font-medium cursor-pointer">
+            Allow image uploads
+          </Label>
+          <p className="text-xs text-muted-foreground mt-1">
+            Let viewers attach up to 5 images to new issues. Images are stored at public URLs so they show in Linear and synced GitHub issues.
+          </p>
+        </div>
+      </div>
+    );
+  };
+
+  const renderIssueFormsSection = () => {
+    if (!allowIssueCreation) return null;
+
+    return (
+      <div className="space-y-4">
+        <h3 className="font-semibold text-lg flex items-center gap-2">
+          <div className="w-6 h-6 bg-primary text-primary-foreground rounded-full flex items-center justify-center text-sm font-bold">
+            5
+          </div>
+          Issue forms (optional)
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          Select which issue forms viewers can choose from when creating an issue. If none are selected, a blank issue form is shown.
+        </p>
+        {issueForms.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No issue forms created yet.{" "}
+            <Link href="/issue-forms" className="text-primary hover:underline">
+              Create your first issue form
+            </Link>
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {issueForms.map((form) => {
+              const isEnabled = enabledIssueFormIds.includes(form.id);
+              return (
+                <div key={form.id} className="flex items-center space-x-3">
+                  <Checkbox
+                    checked={isEnabled}
+                    onChange={() =>
+                      setEnabledIssueFormIds((prev) =>
+                        isEnabled
+                          ? prev.filter((id) => id !== form.id)
+                          : [...prev, form.id]
+                      )
+                    }
+                  />
+                  <Label className="text-sm font-normal cursor-pointer">
+                    {form.name}
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {form.questions.length} question{form.questions.length !== 1 ? "s" : ""}
+                    </span>
+                  </Label>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderIncludedLabelsSection = () => {
+    const hasSelectedSource =
+      sourceType === "project" ? Boolean(selectedProject) : Boolean(selectedTeam);
+
+    return (
+      <div className="space-y-3">
+        <div>
+          <Label className="text-sm font-medium">Included labels</Label>
+          <p className="text-xs text-muted-foreground mt-1">
+            Leave empty to include every issue in this source. Select labels to
+            show only issues with at least one selected label.
+          </p>
+        </div>
+        {!hasSelectedSource ? (
+          <p className="text-sm text-muted-foreground border border-border rounded-lg p-3">
+            Select a source to load labels.
+          </p>
+        ) : loadingLabels ? (
+          <p className="text-sm text-muted-foreground border border-border rounded-lg p-3">
+            Loading labels…
+          </p>
+        ) : availableLabels.length === 0 ? (
+          <p className="text-sm text-muted-foreground border border-border rounded-lg p-3">
+            No labels found for this source.
+          </p>
+        ) : (
+          <div className="max-h-48 overflow-y-auto border border-border rounded-lg p-2 grid grid-cols-1 sm:grid-cols-2 gap-1">
+            {availableLabels.map((label) => {
+              const isSelected = allowedLabelIds.includes(label.id);
+              return (
+              <div
+                key={label.id}
+                role="checkbox"
+                aria-checked={isSelected}
+                tabIndex={0}
+                className="flex items-center gap-2 px-2 py-1 rounded hover:bg-accent cursor-pointer min-w-0"
+                onClick={() => toggleAllowedLabel(label.id)}
+                onKeyDown={(event) => {
+                  if (event.key === " " || event.key === "Enter") {
+                    event.preventDefault();
+                    toggleAllowedLabel(label.id);
+                  }
+                }}
+              >
+                <Checkbox
+                  checked={isSelected}
+                  onChange={() => toggleAllowedLabel(label.id)}
+                  onClick={(event) => event.stopPropagation()}
+                />
+                <span
+                  className="h-2.5 w-2.5 rounded-full flex-shrink-0"
+                  style={{ backgroundColor: label.color }}
+                  aria-hidden="true"
+                />
+                <span className="text-sm truncate">{label.name}</span>
+              </div>
+              );
+            })}
+          </div>
+        )}
+        {allowedLabelIds.length > 0 && (
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs text-muted-foreground">
+              {allowedLabelIds.length} label{allowedLabelIds.length === 1 ? "" : "s"} selected.
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setAllowedLabelIds([])}
+              className="h-8 px-2 gap-1"
+            >
+              <X className="h-3 w-3" />
+              Clear
+            </Button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   if (authLoading) {
     return <div>Loading...</div>;
   }
 
   if (!user) {
     return <div>Loading...</div>;
-  }
-
-  if (!linearToken) {
-    return (
-      <div className="min-h-screen">
-        <Navigation />
-        <div className="max-w-4xl mx-auto p-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Linear API token required</CardTitle>
-              <CardDescription>
-                You need to save your Linear API token before creating public
-                views.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Link href="/profile">
-                <Button>Go to profile settings</Button>
-              </Link>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-    );
   }
 
   return (
@@ -596,20 +1084,27 @@ export default function PublicViewsPage() {
           </div>
 
           <div className="text-center">
-            <Button
-              onClick={() => {
-                setShowCreateView(true);
-                setShowEditView(false);
-                setEditingView(null);
-              }}
-              disabled={projects.length === 0 && teams.length === 0}
-              size="lg"
-              className="h-12 px-8 font-semibold"
-            >
-              {views.length === 0
-                ? "Create your first public view"
-                : "Create new view"}
-            </Button>
+            {hasLinearToken ? (
+              <Button
+                onClick={() => {
+                  resetForm();
+                  setShowCreateView(true);
+                }}
+                disabled={!activeOrgId || (projects.length === 0 && teams.length === 0)}
+                size="lg"
+                className="h-12 px-8 font-semibold"
+              >
+                {views.length === 0
+                  ? "Create your first public view"
+                  : "Create new view"}
+              </Button>
+            ) : (
+              <Link href="/profile">
+                <Button variant="outline" size="lg" className="h-12 px-8 font-semibold">
+                  Set up Linear API token to create views
+                </Button>
+              </Link>
+            )}
           </div>
         </div>
 
@@ -701,9 +1196,7 @@ export default function PublicViewsPage() {
                     <Label>Source type *</Label>
                     <Select
                       value={sourceType}
-                      onValueChange={(value) =>
-                        setSourceType(value as "project" | "team")
-                      }
+                      onValueChange={handleSourceTypeChange}
                     >
                       <SelectTrigger>
                         <SelectValue placeholder="Choose data source type" />
@@ -718,81 +1211,32 @@ export default function PublicViewsPage() {
                   {sourceType === "project" ? (
                     <div className="space-y-2">
                       <Label htmlFor="project">Linear project *</Label>
-                      <Select
+                      <SourceCombobox
+                        id="project"
                         value={selectedProject}
-                        onValueChange={handleSelectProject}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Choose which project to share" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {projects.map((project) => (
-                            <SelectItem key={project.id} value={project.id}>
-                              {project.name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                        options={projectOptions}
+                        placeholder="Choose which project to share"
+                        searchPlaceholder="Search projects..."
+                        emptyMessage="No projects found."
+                        onValueChange={handleProjectChange}
+                      />
                     </div>
                   ) : (
                     <div className="space-y-2">
                       <Label htmlFor="team">Linear team *</Label>
-                      <Select
+                      <SourceCombobox
+                        id="team"
                         value={selectedTeam}
-                        onValueChange={handleSelectTeam}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Choose which team to share" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {teams.map((team) => (
-                            <SelectItem key={team.id} value={team.id}>
-                              {team.name} ({team.key})
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                        options={teamOptions}
+                        placeholder="Choose which team to share"
+                        searchPlaceholder="Search teams..."
+                        emptyMessage="No teams found."
+                        onValueChange={handleTeamChange}
+                      />
                     </div>
                   )}
-
-                  {/* Hidden statuses */}
-                  {availableStatuses.length > 0 && (
-                    <div className="space-y-2">
-                      <Label>Hide statuses from public view</Label>
-                      <p className="text-xs text-muted-foreground">
-                        Issues with these statuses will not appear in the public view
-                      </p>
-                      <div className="flex flex-wrap gap-2 pt-1">
-                        {availableStatuses.map((status) => {
-                          const isHidden = hiddenStatuses.includes(status.name);
-                          return (
-                            <button
-                              key={status.id}
-                              type="button"
-                              onClick={() =>
-                                setHiddenStatuses((prev) =>
-                                  isHidden
-                                    ? prev.filter((s) => s !== status.name)
-                                    : [...prev, status.name]
-                                )
-                              }
-                              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
-                                isHidden
-                                  ? "border-destructive/50 bg-destructive/10 text-destructive line-through"
-                                  : "border-border bg-background text-foreground hover:bg-accent"
-                              }`}
-                            >
-                              <span
-                                className="w-2 h-2 rounded-full flex-shrink-0"
-                                style={{ backgroundColor: status.color }}
-                              />
-                              {status.name}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
+                  {renderIncludedLabelsSection()}
+                  {renderHiddenStatusesSection()}
                 </div>
               </div>
 
@@ -865,77 +1309,61 @@ export default function PublicViewsPage() {
                       </p>
                     </div>
                   </div>
-                  {allowIssueCreation && (
-                    <div className="flex items-start space-x-3">
-                      <div className="flex-shrink-0 mt-0.5">
-                        <Checkbox
-                          checked={allowImageUploads}
-                          onChange={() => setAllowImageUploads(!allowImageUploads)}
-                        />
-                      </div>
-                      <div className="flex-1">
-                        <Label className="text-sm font-medium cursor-pointer">
-                          Allow image uploads
-                        </Label>
-                        <p className="text-xs text-muted-foreground mt-1">
-                          Let viewers attach up to 5 images to new issues. Images are stored at public URLs so they show in Linear and synced GitHub issues.
-                        </p>
-                      </div>
+                  {renderImageUploadOption()}
+                  <div className="flex items-start space-x-3">
+                    <div className="flex-shrink-0 mt-0.5">
+                      <Checkbox
+                        checked={showProjectUpdates}
+                        onChange={() => setShowProjectUpdates(!showProjectUpdates)}
+                      />
                     </div>
-                  )}
+                    <div className="flex-1">
+                      <Label className="text-sm font-medium cursor-pointer">
+                        Show project updates button
+                      </Label>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Display the &quot;Updates&quot; button on project-based views
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3">
+                    <div className="flex-shrink-0 mt-0.5">
+                      <Checkbox
+                        checked={showComments}
+                        onChange={() => setShowComments(!showComments)}
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <Label className="text-sm font-medium cursor-pointer">
+                        Show comments on issue detail
+                      </Label>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Expose Linear comments when a viewer opens an issue
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3">
+                    <div className="flex-shrink-0 mt-0.5">
+                      <Checkbox
+                        checked={showActivity}
+                        onChange={() => setShowActivity(!showActivity)}
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <Label className="text-sm font-medium cursor-pointer">
+                        Show activity history on issue detail
+                      </Label>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Expose status, assignee and priority changes on an issue
+                      </p>
+                    </div>
+                  </div>
                 </div>
               </div>
 
-              {/* Step 5: Issue Forms */}
-              {allowIssueCreation && (
-                <div className="space-y-4">
-                  <h3 className="font-semibold text-lg flex items-center gap-2">
-                    <div className="w-6 h-6 bg-primary text-primary-foreground rounded-full flex items-center justify-center text-sm font-bold">
-                      5
-                    </div>
-                    Issue forms (optional)
-                  </h3>
-                  <p className="text-xs text-muted-foreground">
-                    Select which issue forms viewers can choose from when creating an issue. If none are selected, a blank issue form is shown.
-                  </p>
-                  {issueForms.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">
-                      No issue forms created yet.{" "}
-                      <Link href="/issue-forms" className="text-primary hover:underline">
-                        Create your first issue form
-                      </Link>
-                    </p>
-                  ) : (
-                    <div className="space-y-2">
-                      {issueForms.map((form) => {
-                        const isEnabled = enabledIssueFormIds.includes(form.id);
-                        return (
-                          <div key={form.id} className="flex items-center space-x-3">
-                            <Checkbox
-                              checked={isEnabled}
-                              onChange={() =>
-                                setEnabledIssueFormIds((prev) =>
-                                  isEnabled
-                                    ? prev.filter((id) => id !== form.id)
-                                    : [...prev, form.id]
-                                )
-                              }
-                            />
-                            <Label className="text-sm font-normal cursor-pointer">
-                              {form.name}
-                              <span className="ml-2 text-xs text-muted-foreground">
-                                {form.questions.length} question{form.questions.length !== 1 ? "s" : ""}
-                              </span>
-                            </Label>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
+              {renderIssueFormsSection()}
 
-              {/* Step 6: Security Options */}
+              {/* Step 5: Security Options */}
               <div className="space-y-4">
                 <h3 className="font-semibold text-lg flex items-center gap-2">
                   <div className="w-6 h-6 bg-primary text-primary-foreground rounded-full flex items-center justify-center text-sm font-bold">
@@ -1065,9 +1493,7 @@ export default function PublicViewsPage() {
                     <Label>Source type *</Label>
                     <Select
                       value={sourceType}
-                      onValueChange={(value) =>
-                        setSourceType(value as "project" | "team")
-                      }
+                      onValueChange={handleSourceTypeChange}
                     >
                       <SelectTrigger>
                         <SelectValue placeholder="Choose data source type" />
@@ -1082,81 +1508,32 @@ export default function PublicViewsPage() {
                   {sourceType === "project" ? (
                     <div className="space-y-2">
                       <Label htmlFor="edit-project">Linear project *</Label>
-                      <Select
+                      <SourceCombobox
+                        id="edit-project"
                         value={selectedProject}
-                        onValueChange={handleSelectProject}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Choose which project to share" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {projects.map((project) => (
-                            <SelectItem key={project.id} value={project.id}>
-                              {project.name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                        options={projectOptions}
+                        placeholder="Choose which project to share"
+                        searchPlaceholder="Search projects..."
+                        emptyMessage="No projects found."
+                        onValueChange={handleProjectChange}
+                      />
                     </div>
                   ) : (
                     <div className="space-y-2">
                       <Label htmlFor="edit-team">Linear team *</Label>
-                      <Select
+                      <SourceCombobox
+                        id="edit-team"
                         value={selectedTeam}
-                        onValueChange={handleSelectTeam}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Choose which team to share" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {teams.map((team) => (
-                            <SelectItem key={team.id} value={team.id}>
-                              {team.name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                        options={teamOptions}
+                        placeholder="Choose which team to share"
+                        searchPlaceholder="Search teams..."
+                        emptyMessage="No teams found."
+                        onValueChange={handleTeamChange}
+                      />
                     </div>
                   )}
-
-                  {/* Hidden statuses */}
-                  {availableStatuses.length > 0 && (
-                    <div className="space-y-2">
-                      <Label>Hide statuses from public view</Label>
-                      <p className="text-xs text-muted-foreground">
-                        Issues with these statuses will not appear in the public view
-                      </p>
-                      <div className="flex flex-wrap gap-2 pt-1">
-                        {availableStatuses.map((status) => {
-                          const isHidden = hiddenStatuses.includes(status.name);
-                          return (
-                            <button
-                              key={status.id}
-                              type="button"
-                              onClick={() =>
-                                setHiddenStatuses((prev) =>
-                                  isHidden
-                                    ? prev.filter((s) => s !== status.name)
-                                    : [...prev, status.name]
-                                )
-                              }
-                              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
-                                isHidden
-                                  ? "border-destructive/50 bg-destructive/10 text-destructive line-through"
-                                  : "border-border bg-background text-foreground hover:bg-accent"
-                              }`}
-                            >
-                              <span
-                                className="w-2 h-2 rounded-full flex-shrink-0"
-                                style={{ backgroundColor: status.color }}
-                              />
-                              {status.name}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
+                  {renderIncludedLabelsSection()}
+                  {renderHiddenStatusesSection()}
                 </div>
               </div>
 
@@ -1222,75 +1599,59 @@ export default function PublicViewsPage() {
                       </p>
                     </div>
                   </div>
-                  {allowIssueCreation && (
-                    <div className="flex items-start space-x-3">
-                      <div className="flex-shrink-0 mt-0.5">
-                        <Checkbox
-                          checked={allowImageUploads}
-                          onChange={() => setAllowImageUploads(!allowImageUploads)}
-                        />
-                      </div>
-                      <div className="flex-1">
-                        <Label className="text-sm font-medium cursor-pointer">
-                          Allow image uploads
-                        </Label>
-                        <p className="text-xs text-muted-foreground mt-1">
-                          Let viewers attach up to 5 images to new issues. Images are stored at public URLs so they show in Linear and synced GitHub issues.
-                        </p>
-                      </div>
+                  {renderImageUploadOption()}
+                  <div className="flex items-start space-x-3">
+                    <div className="flex-shrink-0 mt-0.5">
+                      <Checkbox
+                        checked={showProjectUpdates}
+                        onChange={() => setShowProjectUpdates(!showProjectUpdates)}
+                      />
                     </div>
-                  )}
+                    <div className="flex-1">
+                      <Label className="text-sm font-medium cursor-pointer">
+                        Show project updates button
+                      </Label>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Display the &quot;Updates&quot; button on project-based views
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3">
+                    <div className="flex-shrink-0 mt-0.5">
+                      <Checkbox
+                        checked={showComments}
+                        onChange={() => setShowComments(!showComments)}
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <Label className="text-sm font-medium cursor-pointer">
+                        Show comments on issue detail
+                      </Label>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Expose Linear comments when a viewer opens an issue
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3">
+                    <div className="flex-shrink-0 mt-0.5">
+                      <Checkbox
+                        checked={showActivity}
+                        onChange={() => setShowActivity(!showActivity)}
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <Label className="text-sm font-medium cursor-pointer">
+                        Show activity history on issue detail
+                      </Label>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Expose status, assignee and priority changes on an issue
+                      </p>
+                    </div>
+                  </div>
                 </div>
               </div>
 
-              {/* Issue Forms (Edit) */}
-              {allowIssueCreation && (
-                <div className="space-y-4">
-                  <h3 className="font-semibold text-lg flex items-center gap-2">
-                    <div className="w-6 h-6 bg-primary text-primary-foreground rounded-full flex items-center justify-center text-sm font-bold">
-                      5
-                    </div>
-                    Issue forms (optional)
-                  </h3>
-                  <p className="text-xs text-muted-foreground">
-                    Select which issue forms viewers can choose from when creating an issue. If none are selected, a blank issue form is shown.
-                  </p>
-                  {issueForms.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">
-                      No issue forms created yet.{" "}
-                      <Link href="/issue-forms" className="text-primary hover:underline">
-                        Create your first issue form
-                      </Link>
-                    </p>
-                  ) : (
-                    <div className="space-y-2">
-                      {issueForms.map((form) => {
-                        const isEnabled = enabledIssueFormIds.includes(form.id);
-                        return (
-                          <div key={form.id} className="flex items-center space-x-3">
-                            <Checkbox
-                              checked={isEnabled}
-                              onChange={() =>
-                                setEnabledIssueFormIds((prev) =>
-                                  isEnabled
-                                    ? prev.filter((id) => id !== form.id)
-                                    : [...prev, form.id]
-                                )
-                              }
-                            />
-                            <Label className="text-sm font-normal cursor-pointer">
-                              {form.name}
-                              <span className="ml-2 text-xs text-muted-foreground">
-                                {form.questions.length} question{form.questions.length !== 1 ? "s" : ""}
-                              </span>
-                            </Label>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
+              {renderIssueFormsSection()}
 
               {/* Security Options */}
               <div className="space-y-4">
@@ -1349,6 +1710,57 @@ export default function PublicViewsPage() {
                 </div>
               </div>
 
+              {/* Excluded issues */}
+              <div className="space-y-4">
+                <h3 className="font-semibold text-lg flex items-center gap-2">
+                  <div className="w-6 h-6 bg-primary text-primary-foreground rounded-full flex items-center justify-center text-sm font-bold">
+                    6
+                  </div>
+                  Excluded issues
+                </h3>
+                <p className="text-sm text-muted-foreground">
+                  Tick any issues you want hidden from the public view.
+                </p>
+                <Input
+                  placeholder="Filter by ID or title..."
+                  value={issueFilter}
+                  onChange={(e) => setIssueFilter(e.target.value)}
+                />
+                <div className="max-h-64 overflow-y-auto space-y-1 border border-border rounded-lg p-2">
+                  {loadingIssues ? (
+                    <p className="text-sm text-muted-foreground py-4 text-center">Loading issues…</p>
+                  ) : filteredPickerIssues.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-4 text-center">No issues match that filter.</p>
+                  ) : (
+                    visiblePickerIssues.map((issue) => (
+                      <label
+                        key={issue.id}
+                        className="flex items-center gap-2 px-2 py-1 rounded hover:bg-accent cursor-pointer"
+                      >
+                        <Checkbox
+                          checked={excludedIssueIds.includes(issue.id)}
+                          onChange={() => toggleExcludeIssue(issue.id)}
+                        />
+                        <span className="text-sm flex-1 min-w-0 flex items-baseline gap-2">
+                          <span className="font-mono text-muted-foreground">{issue.identifier}</span>
+                          <span className="truncate">{issue.title}</span>
+                        </span>
+                      </label>
+                    ))
+                  )}
+                </div>
+                {hiddenPickerCount > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    Showing first {EXCLUDED_PICKER_LIMIT} of {filteredPickerIssues.length} matches. Refine the filter to see more.
+                  </p>
+                )}
+                {excludedIssueIds.length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {excludedIssueIds.length} issue{excludedIssueIds.length === 1 ? "" : "s"} will be hidden from this view.
+                  </p>
+                )}
+              </div>
+
               <div className="flex gap-3 pt-4 border-t">
                 <Button
                   onClick={updateView}
@@ -1393,11 +1805,10 @@ export default function PublicViewsPage() {
                 </p>
                 <Button
                   onClick={() => {
+                    resetForm();
                     setShowCreateView(true);
-                    setShowEditView(false);
-                    setEditingView(null);
                   }}
-                  disabled={projects.length === 0 && teams.length === 0}
+                  disabled={!activeOrgId || (projects.length === 0 && teams.length === 0)}
                 >
                   Create your first view
                 </Button>
@@ -1480,23 +1891,25 @@ export default function PublicViewsPage() {
                             Preview
                           </Button>
                         </Link>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => startEditView(view)}
-                          className="flex items-center gap-2"
-                        >
-                          <Edit3 className="h-4 w-4" />
-                          Edit
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => deleteView(view.id)}
-                          className="text-destructive hover:text-destructive"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => startEditView(view)}
+                            className="flex items-center gap-2"
+                          >
+                            <Edit3 className="h-4 w-4" />
+                            Edit
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => deleteView(view.id)}
+                            className="text-destructive hover:text-destructive"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </>
                       </div>
                     </div>
                   </CardContent>

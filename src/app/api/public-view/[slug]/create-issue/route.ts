@@ -1,160 +1,87 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { authorisePublicView } from '@/lib/public-view-auth';
+import { checkRateLimit, getClientIp, rateLimitResponse } from '@/lib/request-security';
 import { supabaseAdmin } from '@/lib/supabase';
-import { decryptToken } from '@/lib/encryption';
 import {
   ISSUE_IMAGES_BUCKET,
   ISSUE_IMAGE_EXTENSIONS,
+  MAX_ISSUE_IMAGES,
+  MAX_ISSUE_IMAGE_SIZE,
   validateIssueImages,
 } from '@/lib/issue-images';
+import {
+  appendAttachmentMarkdown,
+  createIssueForPublicView,
+  resolveLinearTokenForPublicView,
+} from '@/lib/public-view-issue-creation';
+import * as z from 'zod';
 
-const LINEAR_API_URL = 'https://api.linear.app/graphql';
+const MAX_ISSUE_CREATE_BODY_BYTES =
+  MAX_ISSUE_IMAGES * MAX_ISSUE_IMAGE_SIZE + 512 * 1024;
 
-interface IssueCreateRequest {
-  title: string;
-  description?: string;
-  stateId?: string;
-  priority?: number;
-  assigneeId?: string;
-  labelIds?: string[];
+const issueCreateSchema = z.object({
+  title: z.string().trim().min(1).max(300),
+  description: z.string().trim().max(10000).optional(),
+  labelIds: z.array(z.string().min(1).max(100)).max(20).optional().default([]),
+});
+
+type IssueCreateValues = z.infer<typeof issueCreateSchema>;
+
+type ParsedIssueCreatePayload = {
+  values: IssueCreateValues;
+  images: File[];
+};
+
+function getFormString(formData: FormData, key: string): string {
+  const value = formData.get(key);
+  return typeof value === 'string' ? value : '';
 }
 
-interface WorkflowState {
-  id: string;
-  name: string;
-  type: string;
-  color: string;
+function isUploadedFile(value: FormDataEntryValue | null): value is File {
+  return typeof File !== 'undefined' && value instanceof File && value.name.trim().length > 0;
 }
 
-// Fetch team metadata directly from Linear API
-async function fetchTeamMetadata(apiToken: string, teamId: string) {
-  const query = `
-    query TeamMetadata($teamId: String!) {
-      team(id: $teamId) {
-        id
-        name
-        triageEnabled
-        triageIssueState {
-          id
-          name
-          type
-          color
-        }
-        states {
-          nodes {
-            id
-            name
-            type
-            color
-          }
-        }
+function parseLabelIds(formData: FormData): string[] {
+  const jsonValue = getFormString(formData, 'labelIds');
+  if (jsonValue) {
+    try {
+      const parsed = JSON.parse(jsonValue) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.filter((labelId): labelId is string => typeof labelId === 'string');
       }
+    } catch {
+      return [];
     }
-  `;
-
-  const response = await fetch(LINEAR_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': apiToken,
-    },
-    body: JSON.stringify({ query, variables: { teamId } }),
-  });
-
-  const data = await response.json() as {
-    data?: {
-      team?: {
-        triageEnabled?: boolean;
-        triageIssueState?: WorkflowState;
-        states?: { nodes: WorkflowState[] };
-      };
-    };
-  };
-
-  return data.data?.team;
-}
-
-// Create issue directly via Linear API
-async function createLinearIssue(
-  apiToken: string,
-  input: {
-    title: string;
-    description?: string;
-    stateId?: string;
-    priority?: number;
-    projectId?: string;
-    teamId: string;
-    labelIds?: string[];
   }
-) {
-  const mutation = `
-    mutation IssueCreate($input: IssueCreateInput!) {
-      issueCreate(input: $input) {
-        success
-        issue {
-          id
-          identifier
-          title
-          description
-          priority
-          state {
-            id
-            name
-            type
-            color
-          }
-          team {
-            id
-            name
-            key
-          }
-          project {
-            id
-            name
-          }
-          labels {
-            nodes {
-              id
-              name
-              color
-            }
-          }
-          createdAt
-          updatedAt
-        }
-      }
-    }
-  `;
 
-  const variables = {
-    input: {
-      title: input.title.trim(),
-      ...(input.description && { description: input.description }),
-      ...(input.stateId && { stateId: input.stateId }),
-      ...(input.priority !== undefined && { priority: input.priority }),
-      ...(input.projectId && { projectId: input.projectId }),
-      teamId: input.teamId,
-      ...(input.labelIds && input.labelIds.length > 0 && { labelIds: input.labelIds }),
-    },
-  };
+  return formData
+    .getAll('labelId')
+    .filter((labelId): labelId is string => typeof labelId === 'string');
+}
 
-  const response = await fetch(LINEAR_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': apiToken,
-    },
-    body: JSON.stringify({ query: mutation, variables }),
-  });
+async function parseIssueCreatePayload(request: NextRequest): Promise<ParsedIssueCreatePayload> {
+  const contentType = request.headers.get('content-type') || '';
 
-  return response.json() as Promise<{
-    errors?: unknown[];
-    data?: {
-      issueCreate?: {
-        success: boolean;
-        issue: unknown;
-      };
+  if (contentType.includes('multipart/form-data')) {
+    const formData = await request.formData();
+    const images = formData
+      .getAll('images')
+      .filter(isUploadedFile);
+
+    return {
+      values: {
+        title: getFormString(formData, 'title'),
+        description: getFormString(formData, 'description'),
+        labelIds: parseLabelIds(formData),
+      },
+      images,
     };
-  }>;
+  }
+
+  return {
+    values: (await request.json()) as IssueCreateValues,
+    images: [],
+  };
 }
 
 export async function POST(
@@ -163,102 +90,70 @@ export async function POST(
 ) {
   try {
     const { slug } = await params;
-    const formData = await request.formData();
-    const payload = formData.get('payload');
-    if (typeof payload !== 'string') {
-      return NextResponse.json({ error: 'Missing issue data' }, { status: 400 });
-    }
-    const issueData: IssueCreateRequest = JSON.parse(payload);
-    const images = formData.getAll('images').filter((value): value is File => value instanceof File);
-
-    // Get the public view
-    const { data: viewData, error: viewError } = await supabaseAdmin
-      .from('public_views')
-      .select('*')
-      .eq('slug', slug)
-      .single();
-
-    if (viewError || !viewData) {
+    const contentLength = Number(request.headers.get('content-length') || 0);
+    if (Number.isFinite(contentLength) && contentLength > MAX_ISSUE_CREATE_BODY_BYTES) {
       return NextResponse.json(
-        { error: 'View not found' },
-        { status: 404 }
+        { error: 'Images are too large' },
+        { status: 413 }
       );
     }
+
+    const clientIp = getClientIp(request);
+    const rateLimit = await checkRateLimit(`public-view:create-issue:${slug}:${clientIp}`, {
+      limit: 10,
+      windowMs: 60 * 60 * 1000,
+    });
+    if (!rateLimit.ok) return rateLimitResponse(rateLimit.retryAfterSeconds);
+
+    const payload = await parseIssueCreatePayload(request);
+
+    const parsed = issueCreateSchema.safeParse(payload.values);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: 'Invalid issue payload', issues: parsed.error.issues },
+        { status: 400 }
+      );
+    }
+    const issueData = parsed.data;
+    const imageError = validateIssueImages(payload.images);
+    if (imageError) {
+      return NextResponse.json({ error: imageError }, { status: 400 });
+    }
+
+    // Auth first: is_active + expiry + password cookie.
+    const auth = await authorisePublicView(slug, request);
+    if (!auth.ok) return auth.response;
+    const viewData = auth.view;
 
     // Check if issue creation is allowed
     if (!viewData.allow_issue_creation) {
       return NextResponse.json(
-        { error: 'Issue creation is not allowed for this view' },
+        { error: 'Issue creation not allowed on this view' },
         { status: 403 }
       );
     }
 
-    if (images.length > 0) {
-      if (!viewData.allow_image_uploads) {
-        return NextResponse.json(
-          { error: 'Image uploads are not allowed for this view' },
-          { status: 403 }
-        );
-      }
-      const imageError = validateIssueImages(images);
-      if (imageError) {
-        return NextResponse.json({ error: imageError }, { status: 400 });
-      }
-    }
-
-    if (!viewData.team_id) {
+    if (payload.images.length > 0 && !viewData.allow_image_uploads) {
       return NextResponse.json(
-        { error: 'View has no team configured' },
-        { status: 400 }
+        { error: 'Image uploads are not allowed for this view' },
+        { status: 403 }
       );
     }
 
-    // Get the user's Linear token
-    const { data: profileData, error: profileError } = await supabaseAdmin
-      .from('profiles')
-      .select('linear_api_token')
-      .eq('id', viewData.user_id)
-      .single();
-
-    if (profileError || !profileData?.linear_api_token) {
+    const linearToken = await resolveLinearTokenForPublicView(viewData);
+    if (!linearToken) {
       return NextResponse.json(
         { error: 'Unable to create issue - Linear API token not found' },
         { status: 500 }
       );
     }
 
-    // Decrypt the token
-    const decryptedToken = decryptToken(profileData.linear_api_token);
-
-    // Fetch team metadata directly from Linear API
-    const teamMetadata = await fetchTeamMetadata(decryptedToken, viewData.team_id);
-
-    // Determine the correct state for public issue creation
-    // Priority: 1) Triage state if enabled, 2) First unstarted state, 3) First available state
-    let finalStateId: string | undefined = undefined;
-
-    if (teamMetadata?.triageEnabled && teamMetadata?.triageIssueState) {
-      // Force triage state when triage is enabled
-      finalStateId = teamMetadata.triageIssueState.id;
-    } else if (teamMetadata?.states?.nodes) {
-      // Fall back to unstarted state
-      const unstartedState = teamMetadata.states.nodes.find(
-        (s: WorkflowState) => s.type === 'unstarted'
-      );
-      if (unstartedState) {
-        finalStateId = unstartedState.id;
-      } else if (teamMetadata.states.nodes.length > 0) {
-        // Last resort: use first available state
-        finalStateId = teamMetadata.states.nodes[0].id;
-      }
-    }
-
     const uploadedPaths: string[] = [];
     let issueCreated = false;
     try {
-      const imageMarkdown: string[] = [];
+      const uploadedImages: Array<{ fileName: string; assetUrl: string }> = [];
       // Sequential so every successful upload is recorded before a later failure triggers cleanup
-      for (const image of images) {
+      for (const image of payload.images) {
         const path = `${viewData.id}/${crypto.randomUUID()}.${ISSUE_IMAGE_EXTENSIONS[image.type]}`;
         const { error: uploadError } = await supabaseAdmin.storage
           .from(ISSUE_IMAGES_BUCKET)
@@ -268,40 +163,29 @@ export async function POST(
         }
         uploadedPaths.push(path);
         const { data: urlData } = supabaseAdmin.storage.from(ISSUE_IMAGES_BUCKET).getPublicUrl(path);
-        imageMarkdown.push(`![${image.name.replace(/[[\]]/g, '')}](${urlData.publicUrl})`);
+        uploadedImages.push({ fileName: image.name, assetUrl: urlData.publicUrl });
       }
 
-      // Create the issue with enforced restrictions
-      // Note: priority and assigneeId are intentionally not passed for public views
-      const result = await createLinearIssue(decryptedToken, {
+      const result = await createIssueForPublicView(linearToken, viewData, {
         title: issueData.title,
-        description: [issueData.description, ...imageMarkdown].filter(Boolean).join('\n\n'),
-        stateId: finalStateId, // Enforced triage/unstarted state
-        priority: 0, // Default to no priority for public views
-        projectId: viewData.project_id,
-        teamId: viewData.team_id,
+        description: appendAttachmentMarkdown(issueData.description, uploadedImages),
         labelIds: issueData.labelIds,
       });
 
-      if (result.errors) {
-        console.error('Linear API errors:', result.errors);
+      if (!result.ok) {
         return NextResponse.json(
-          { error: 'Failed to create issue', details: result.errors },
-          { status: 400 }
-        );
-      }
-
-      if (!result.data?.issueCreate?.success) {
-        return NextResponse.json(
-          { error: 'Failed to create issue' },
-          { status: 400 }
+          {
+            error: result.error,
+            ...(result.details ? { details: result.details } : {}),
+          },
+          { status: result.status }
         );
       }
 
       issueCreated = true;
       return NextResponse.json({
         success: true,
-        issue: result.data.issueCreate.issue,
+        issue: result.issue,
       });
     } finally {
       if (!issueCreated && uploadedPaths.length > 0) {

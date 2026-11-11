@@ -1,34 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
-import type { Roadmap, RoadmapComment } from '@/lib/supabase';
-import crypto from 'crypto';
+import type { RoadmapComment } from '@/lib/supabase';
+import { authoriseRoadmap } from '@/lib/roadmap-auth';
+import { resolveRoadmapIssue } from '@/lib/roadmap-issue-access';
+import { checkRateLimit, getClientIp, hashIp, rateLimitResponse } from '@/lib/request-security';
+import * as z from 'zod';
 
-function hashIP(ip: string): string {
-  const salt = process.env.IP_HASH_SALT || 'default-salt';
-  return crypto
-    .createHash('sha256')
-    .update(ip + salt)
-    .digest('hex');
-}
-
-function getClientIP(request: NextRequest): string {
-  const forwardedFor = request.headers.get('x-forwarded-for');
-  if (forwardedFor) {
-    return forwardedFor.split(',')[0].trim();
-  }
-
-  const realIP = request.headers.get('x-real-ip');
-  if (realIP) {
-    return realIP;
-  }
-
-  const cfConnectingIP = request.headers.get('cf-connecting-ip');
-  if (cfConnectingIP) {
-    return cfConnectingIP;
-  }
-
-  return 'unknown';
-}
+const issueIdSchema = z.string().trim().min(1).max(120);
+const commentCreateSchema = z.object({
+  issueId: issueIdSchema,
+  authorName: z.string().trim().min(1).max(120),
+  authorEmail: z.string().trim().max(320).optional(),
+  content: z.string().trim().min(1).max(2000),
+  fingerprint: z.string().trim().max(200).optional(),
+});
 
 export async function GET(
   request: NextRequest,
@@ -37,7 +22,7 @@ export async function GET(
   try {
     const { slug } = await params;
     const { searchParams } = new URL(request.url);
-    const issueId = searchParams.get('issueId');
+    const parsedIssueId = issueIdSchema.safeParse(searchParams.get('issueId'));
 
     if (!slug) {
       return NextResponse.json(
@@ -46,36 +31,29 @@ export async function GET(
       );
     }
 
-    if (!issueId) {
+    if (!parsedIssueId.success) {
       return NextResponse.json(
         { error: 'issueId query parameter is required' },
         { status: 400 }
       );
     }
 
-    // Check if roadmap exists and is active
-    const { data: roadmapData, error: roadmapError } = await supabaseAdmin
-      .from('roadmaps')
-      .select('id, is_active')
-      .eq('slug', slug)
-      .eq('is_active', true)
-      .single();
+    // Auth first: is_active + expiry + password cookie. Comments on a
+    // password-protected roadmap should require the cookie the main POST
+    // issued.
+    const auth = await authoriseRoadmap(slug, request);
+    if (!auth.ok) return auth.response;
+    const roadmap = auth.roadmap;
 
-    if (roadmapError || !roadmapData) {
-      return NextResponse.json(
-        { error: 'Roadmap not found or inactive' },
-        { status: 404 }
-      );
-    }
-
-    const roadmap = roadmapData as Pick<Roadmap, 'id' | 'is_active'>;
+    const issueAccess = await resolveRoadmapIssue(roadmap, parsedIssueId.data);
+    if (!issueAccess.ok) return issueAccess.response;
 
     // Fetch approved, non-hidden comments for this issue
     const { data: comments, error: commentsError } = await supabaseAdmin
       .from('roadmap_comments')
       .select('id, author_name, content, created_at')
       .eq('roadmap_id', roadmap.id)
-      .eq('issue_id', issueId)
+      .eq('issue_id', issueAccess.issueId)
       .eq('is_approved', true)
       .eq('is_hidden', false)
       .order('created_at', { ascending: true });
@@ -107,15 +85,6 @@ export async function POST(
 ) {
   try {
     const { slug } = await params;
-    const body = await request.json() as {
-      issueId?: string;
-      authorName?: string;
-      authorEmail?: string;
-      content?: string;
-      fingerprint?: string;
-    };
-
-    const { issueId, authorName, authorEmail, content, fingerprint } = body;
 
     if (!slug) {
       return NextResponse.json(
@@ -124,29 +93,27 @@ export async function POST(
       );
     }
 
-    if (!issueId || !authorName || !content) {
+    const clientIp = getClientIp(request);
+    const rateLimit = await checkRateLimit(`roadmap-comment:${slug}:${clientIp}`, {
+      limit: 5,
+      windowMs: 10 * 60 * 1000,
+    });
+    if (!rateLimit.ok) return rateLimitResponse(rateLimit.retryAfterSeconds);
+
+    const parsed = commentCreateSchema.safeParse(await request.json());
+    if (!parsed.success) {
       return NextResponse.json(
         { error: 'issueId, authorName, and content are required' },
         { status: 400 }
       );
     }
+    const { issueId, authorName, content, fingerprint } = parsed.data;
+    const authorEmail = parsed.data.authorEmail?.trim() || '';
 
-    // Check if roadmap exists, is active, and allows comments
-    const { data: roadmapData, error: roadmapError } = await supabaseAdmin
-      .from('roadmaps')
-      .select('id, allow_comments, require_email_for_comments, moderate_comments, is_active')
-      .eq('slug', slug)
-      .eq('is_active', true)
-      .single();
-
-    if (roadmapError || !roadmapData) {
-      return NextResponse.json(
-        { error: 'Roadmap not found or inactive' },
-        { status: 404 }
-      );
-    }
-
-    const roadmap = roadmapData as Pick<Roadmap, 'id' | 'allow_comments' | 'require_email_for_comments' | 'moderate_comments' | 'is_active'>;
+    // Auth first: is_active + expiry + password cookie.
+    const auth = await authoriseRoadmap(slug, request);
+    if (!auth.ok) return auth.response;
+    const roadmap = auth.roadmap;
 
     if (!roadmap.allow_comments) {
       return NextResponse.json(
@@ -171,39 +138,29 @@ export async function POST(
       );
     }
 
-    // Basic content validation (prevent empty or too long comments)
-    const trimmedContent = content.trim();
-    if (trimmedContent.length < 1) {
-      return NextResponse.json(
-        { error: 'Comment cannot be empty' },
-        { status: 400 }
-      );
-    }
+    const issueAccess = await resolveRoadmapIssue(roadmap, issueId);
+    if (!issueAccess.ok) return issueAccess.response;
 
-    if (trimmedContent.length > 2000) {
-      return NextResponse.json(
-        { error: 'Comment is too long (max 2000 characters)' },
-        { status: 400 }
-      );
-    }
-
-    // Hash the client IP
-    const clientIP = getClientIP(request);
-    const ipHash = hashIP(clientIP);
+    // The hash is optional abuse-analysis metadata; do not make commenting
+    // unavailable when a deployment is missing the hash salt.
+    const ipHash = hashIp(clientIp);
 
     // Determine if comment should be auto-approved
     const isApproved = !roadmap.moderate_comments;
 
-    // Insert the comment
+    // Insert the comment. organisation_id is NOT NULL after migration 019
+    // and linear_issue_id is the new home for the Linear issue id.
     const { data: newComment, error: insertError } = await supabaseAdmin
       .from('roadmap_comments')
       .insert({
         roadmap_id: roadmap.id,
-        issue_id: issueId,
+        organisation_id: roadmap.organisation_id,
+        issue_id: issueAccess.issueId,
+        linear_issue_id: issueAccess.issueId,
         author_name: authorName.trim(),
-        author_email: authorEmail?.trim() || '',
+        author_email: authorEmail,
         author_email_verified: false, // TODO: implement email verification
-        content: trimmedContent,
+        content,
         is_approved: isApproved,
         is_hidden: false,
         visitor_fingerprint: fingerprint || null,

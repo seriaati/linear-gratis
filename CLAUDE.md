@@ -8,17 +8,18 @@ Always make sure any new components are perfect in alignment with the existing d
 
 ## Commands
 
-```bash
-npm run dev          # Start dev server with Turbopack (localhost:3000)
-npm run build        # Next.js production build
-npm run build:worker # Build for Cloudflare Pages (OpenNextJS)
-npm run preview      # Local Cloudflare Pages preview
-npm run deploy       # Deploy to Cloudflare Pages
-npm run lint         # ESLint
-npm run generate-og  # Generate OG images with Puppeteer
-```
+Package manager is Bun (`bun.lock`).
 
-There are no tests configured in this project.
+```bash
+bun run dev          # Start dev server with Turbopack (localhost:3000)
+bun run build        # Next.js production build
+bun run build:worker # Build for Cloudflare (OpenNextJS)
+bun run preview      # Local Cloudflare preview
+bun run lint         # ESLint
+bun test             # Unit tests in tests/
+bun run test:db      # SQL invariant tests in supabase/tests (needs local Supabase)
+bun run generate-og  # Generate OG images with Puppeteer
+```
 
 ## Environment
 
@@ -31,11 +32,11 @@ Copy `.env.example` to `.env.local`. Required variables:
 
 ## Architecture
 
-**linear-gratis** is a Next.js 15 App Router app that lets users create customer feedback forms that submit directly to Linear. Deployed to Cloudflare Pages via OpenNextJS.
+**linear-gratis** is a Next.js 16 App Router app that lets users create customer feedback forms that submit directly to Linear. Deployed to Cloudflare Pages via OpenNextJS.
 
 ### Key patterns
 
-**Token security:** Linear API tokens are AES-encrypted (CryptoJS) before storing in Supabase. Decryption only happens server-side via `/api/decrypt-token`. Never expose raw tokens to the client.
+**Token security:** Linear API tokens are encrypted with AES-256-GCM (`src/lib/encryption-v2.ts`, legacy v1 tokens rotate lazily) and only ever decrypted server-side. Never expose raw tokens to the client.
 
 **Auth:** Supabase Auth (email magic link + GitHub OAuth). Auth state lives in `src/contexts/auth-context.tsx`. Use `src/lib/supabase/server.ts` for server components and `src/lib/supabase/client.ts` for client components.
 
@@ -43,7 +44,7 @@ Copy `.env.example` to `.env.local`. Required variables:
 
 **Branding:** Users can customize form appearance and add custom domains. Branding state flows through `src/contexts/branding-context.tsx`. Custom domain verification uses Cloudflare API + DNS TXT records (`src/lib/dns.ts`).
 
-**Database:** Supabase PostgreSQL with migrations in `supabase/migrations/`. Run them in order (001–010). Key tables: `customer_request_forms`, `branding_settings`, `custom_domains`, `roadmaps`.
+**Database:** Supabase PostgreSQL with migrations in `supabase/migrations/` (applied in order; manual rollbacks live in `supabase/rollbacks/`). Resources are scoped to organisations (`organisations`, `organisation_members`). Key tables: `public_views`, `customer_request_forms`, `issue_forms`, `branding_settings`, `custom_domains`, `roadmaps`.
 
 **Deployment:** `wrangler.jsonc` configures Cloudflare Pages. Node.js compatibility is enabled. The `next.config.ts` polyfills Node builtins (`crypto`, `fs`, `stream`) for edge compatibility.
 

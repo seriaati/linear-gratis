@@ -1,4 +1,96 @@
 /**
+ * Shape of a Relay-style connection returned by the Linear GraphQL API.
+ */
+export type LinearConnection<T> = {
+  nodes: T[];
+  pageInfo: {
+    hasNextPage: boolean;
+    endCursor: string | null;
+  };
+};
+
+/**
+ * Fetches every page of a Linear GraphQL connection by following `endCursor`
+ * until `hasNextPage` is false.
+ *
+ * The supplied `query` must declare `$after: String` and pass it to the
+ * connection being paginated. `extract` navigates from the `data` object to
+ * the connection (which allows nested shapes like `data.project.projectUpdates`).
+ * `maxPages` bounds the loop so a misbehaving API cannot hang the request.
+ */
+export async function paginateLinearConnection<T>(args: {
+  apiToken: string;
+  query: string;
+  variables?: Record<string, unknown>;
+  extract: (data: Record<string, unknown>) => LinearConnection<T>;
+  maxPages?: number;
+}): Promise<{ success: true; nodes: T[] } | { success: false; error: string }> {
+  const { apiToken, query, variables = {}, extract, maxPages = 100 } = args;
+
+  const allNodes: T[] = [];
+  let endCursor: string | null = null;
+  let hasNextPage = true;
+  let pages = 0;
+
+  while (hasNextPage) {
+    if (pages++ >= maxPages) {
+      return {
+        success: false,
+        error: `Pagination exceeded safety limit (${maxPages} pages)`,
+      };
+    }
+
+    const response = await fetch('https://api.linear.app/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: apiToken.trim(),
+      },
+      body: JSON.stringify({
+        query,
+        variables: { ...variables, after: endCursor },
+      }),
+    });
+
+    if (!response.ok) {
+      let errorDetails = '';
+      try {
+        errorDetails = ` - ${await response.text()}`;
+      } catch {
+        // Ignore text parsing errors
+      }
+      return {
+        success: false,
+        error: `Linear API error: ${response.status} ${response.statusText}${errorDetails}`,
+      };
+    }
+
+    const result = (await response.json()) as {
+      data?: Record<string, unknown>;
+      errors?: Array<{ message: string }>;
+    };
+
+    if (result.errors) {
+      return {
+        success: false,
+        error: `GraphQL errors: ${result.errors.map((e) => e.message).join(', ')}`,
+      };
+    }
+
+    if (!result.data) {
+      return { success: false, error: 'No data returned from Linear API' };
+    }
+
+    const connection = extract(result.data);
+    allNodes.push(...connection.nodes);
+    hasNextPage = connection.pageInfo.hasNextPage;
+    endCursor = connection.pageInfo.endCursor;
+  }
+
+  return { success: true, nodes: allNodes };
+}
+
+/**
  * Linear issue type returned from the API
  */
 export type LinearIssue = {
@@ -8,6 +100,7 @@ export type LinearIssue = {
   description?: string;
   priority: number;
   priorityLabel: string;
+  estimate?: number;
   url: string;
   state: {
     id: string;
@@ -18,6 +111,7 @@ export type LinearIssue = {
   assignee?: {
     id: string;
     name: string;
+    avatarUrl?: string;
   };
   labels: Array<{
     id: string;
@@ -41,37 +135,36 @@ export async function fetchLinearIssues(
     projectId?: string;
     teamId?: string;
     statuses?: string[];
+    labelIds?: string[];
   }
 ): Promise<{ success: true; issues: LinearIssue[] } | { success: false; error: string }> {
   try {
-    const { projectId, teamId, statuses } = options;
+    const { projectId, teamId, statuses, labelIds } = options;
 
     if (!projectId && !teamId) {
       return { success: false, error: 'Either projectId or teamId must be provided' };
     }
 
-    // Build the filter conditions
-    let filterCondition = '';
+    const filter: Record<string, unknown> = {};
     if (projectId) {
-      filterCondition = `project: { id: { eq: "${projectId}" } }`;
+      filter.project = { id: { eq: projectId } };
     } else if (teamId) {
-      filterCondition = `team: { id: { eq: "${teamId}" } }`;
+      filter.team = { id: { eq: teamId } };
     }
-
-    // Add status filter if provided
     if (statuses && statuses.length > 0) {
-      const statusFilter = `state: { name: { in: [${statuses.map((s) => `"${s}"`).join(', ')}] } }`;
-      filterCondition = filterCondition
-        ? `${filterCondition}, ${statusFilter}`
-        : statusFilter;
+      filter.state = { name: { in: statuses } };
+    }
+    if (labelIds && labelIds.length > 0) {
+      filter.labels = { some: { id: { in: labelIds } } };
     }
 
     const query = `
-      query Issues {
+      query Issues($after: String, $filter: IssueFilter) {
         issues(
-          filter: { ${filterCondition} }
+          filter: $filter
           orderBy: updatedAt
-          first: 50
+          first: 250
+          after: $after
         ) {
           nodes {
             id
@@ -80,6 +173,7 @@ export async function fetchLinearIssues(
             description
             priority
             priorityLabel
+            estimate
             url
             state {
               id
@@ -90,6 +184,7 @@ export async function fetchLinearIssues(
             assignee {
               id
               name
+              avatarUrl
             }
             labels {
               nodes {
@@ -101,75 +196,65 @@ export async function fetchLinearIssues(
             createdAt
             updatedAt
           }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
         }
       }
     `;
 
-    const response = await fetch('https://api.linear.app/graphql', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: apiToken.trim(),
-      },
-      body: JSON.stringify({ query }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      return { success: false, error: `Linear API error: ${response.status} ${response.statusText} - ${errorText}` };
-    }
-
-    const result = await response.json() as {
-      data?: {
-        issues: {
-          nodes: Array<{
-            id: string;
-            identifier: string;
-            title: string;
-            description?: string;
-            priority: number;
-            priorityLabel: string;
-            url: string;
-            state: {
-              id: string;
-              name: string;
-              color: string;
-              type: string;
-            };
-            assignee?: {
-              id: string;
-              name: string;
-            };
-            labels: {
-              nodes: Array<{
-                id: string;
-                name: string;
-                color: string;
-              }>;
-            };
-            createdAt: string;
-            updatedAt: string;
-          }>;
-        };
+    type IssueNode = {
+      id: string;
+      identifier: string;
+      title: string;
+      description?: string;
+      priority: number;
+      priorityLabel: string;
+      estimate?: number;
+      url: string;
+      state: {
+        id: string;
+        name: string;
+        color: string;
+        type: string;
       };
-      errors?: Array<{ message: string }>;
+      assignee?: {
+        id: string;
+        name: string;
+        avatarUrl?: string;
+      };
+      labels: {
+        nodes: Array<{
+          id: string;
+          name: string;
+          color: string;
+        }>;
+      };
+      createdAt: string;
+      updatedAt: string;
     };
 
-    if (result.errors) {
-      return { success: false, error: `GraphQL errors: ${result.errors.map((e) => e.message).join(', ')}` };
+    const result = await paginateLinearConnection<IssueNode>({
+      apiToken,
+      query,
+      variables: { filter },
+      extract: (data) =>
+        (data as { issues: LinearConnection<IssueNode> }).issues,
+    });
+
+    if (!result.success) {
+      return result;
     }
 
-    if (!result.data) {
-      return { success: false, error: 'No data returned from Linear API' };
-    }
-
-    const issues: LinearIssue[] = result.data.issues.nodes.map((issue) => ({
+    const issues: LinearIssue[] = result.nodes.map((issue) => ({
       id: issue.id,
       identifier: issue.identifier,
       title: issue.title,
       description: issue.description,
       priority: issue.priority,
       priorityLabel: issue.priorityLabel,
+      estimate: issue.estimate,
       url: issue.url,
       state: issue.state,
       assignee: issue.assignee,
@@ -215,13 +300,14 @@ export async function fetchRoadmapIssues(
       return { success: false, error: 'At least one projectId must be provided' };
     }
 
-    // Build filter for multiple projects
-    const projectFilter = projectIds.map((id) => `{ id: { eq: "${id}" } }`).join(', ');
+    const filter = {
+      project: { or: projectIds.map((id) => ({ id: { eq: id } })) },
+    };
 
     const query = `
-      query RoadmapIssues {
+      query RoadmapIssues($filter: IssueFilter) {
         issues(
-          filter: { project: { or: [${projectFilter}] } }
+          filter: $filter
           orderBy: updatedAt
           first: 100
         ) {
@@ -232,6 +318,7 @@ export async function fetchRoadmapIssues(
             description
             priority
             priorityLabel
+            estimate
             url
             dueDate
             state {
@@ -243,6 +330,7 @@ export async function fetchRoadmapIssues(
             assignee {
               id
               name
+              avatarUrl
             }
             labels {
               nodes {
@@ -269,7 +357,7 @@ export async function fetchRoadmapIssues(
         'Content-Type': 'application/json',
         Authorization: apiToken.trim(),
       },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query, variables: { filter } }),
     });
 
     if (!response.ok) {
@@ -287,6 +375,7 @@ export async function fetchRoadmapIssues(
             description?: string;
             priority: number;
             priorityLabel: string;
+            estimate?: number;
             url: string;
             dueDate?: string;
             state: {
@@ -298,6 +387,7 @@ export async function fetchRoadmapIssues(
             assignee?: {
               id: string;
               name: string;
+              avatarUrl?: string;
             };
             labels: {
               nodes: Array<{
@@ -334,6 +424,7 @@ export async function fetchRoadmapIssues(
       description: issue.description,
       priority: issue.priority,
       priorityLabel: issue.priorityLabel,
+      estimate: issue.estimate,
       url: issue.url,
       dueDate: issue.dueDate,
       state: issue.state,

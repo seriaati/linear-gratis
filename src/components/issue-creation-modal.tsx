@@ -4,17 +4,9 @@ import React, { useState, useRef, useEffect, useCallback } from 'react'
 import Image from 'next/image'
 import { Button } from '@/components/ui/button'
 import { X, Maximize2, ChevronDown, Paperclip } from 'lucide-react'
+import { StateIcon } from '@/components/state-icon'
 import { MAX_ISSUE_IMAGES, ISSUE_IMAGE_TYPES, validateIssueImages } from '@/lib/issue-images'
-
-interface IssueFormQuestion {
-  id: string
-  type: 'short' | 'long' | 'dropdown'
-  label: string
-  placeholder?: string
-  required: boolean
-  options: string[]
-  order: number
-}
+import type { IssueFormQuestion } from '@/lib/supabase'
 
 interface IssueCreationModalProps {
   isOpen: boolean
@@ -135,17 +127,6 @@ function UrgentPriorityIcon() {
     </svg>
   )
 }
-
-function TodoIcon() {
-  return (
-    <svg aria-label="Todo" className="color-override color-override" width="14" height="14" viewBox="0 0 14 14" fill="none">
-      <rect x="1" y="1" width="12" height="12" rx="6" stroke="#e2e2e2" strokeWidth="1.5" fill="none"></rect>
-      <path fill="#e2e2e2" stroke="none" d="M 3.5,3.5 L3.5,0 A3.5,3.5 0 0,1 3.5, 0 z" transform="translate(3.5,3.5)"></path>
-    </svg>
-  )
-}
-
-
 
 export function IssueCreationModal({
   isOpen,
@@ -284,36 +265,25 @@ export function IssueCreationModal({
     }
   }, [isOpen, viewSlug, loadMetadata])
 
-  const addImages = (files: File[]) => {
-    const validationError = validateIssueImages([...images.map(image => image.file), ...files])
-    if (validationError) {
-      setError(validationError)
-      return
-    }
-    setError(null)
-    setImages(prev => [
-      ...prev,
-      ...files.map(file => ({ file, previewUrl: URL.createObjectURL(file) })),
-    ])
-  }
+  const resetDraft = () => {
+    setFormData({
+      title: '',
+      description: '',
+      priority: 0,
+      labelIds: [],
+      teamId,
+      projectId,
+    })
+    setSelectedAssignee(null)
+    setSelectedLabels([])
+    setQuestionAnswers({})
+    setImages(prev => {
+      prev.forEach(image => URL.revokeObjectURL(image.previewUrl))
+      return []
+    })
 
-  const removeImage = (index: number) => {
-    URL.revokeObjectURL(images[index].previewUrl)
-    setImages(prev => prev.filter((_, i) => i !== index))
-  }
-
-  const handlePaste = (e: React.ClipboardEvent) => {
-    if (!allowImageUploads) return
-    const files = Array.from(e.clipboardData.files).filter(file => file.type.startsWith('image/'))
-    if (files.length === 0) return
-    e.preventDefault()
-    addImages(files)
-  }
-
-  const handleDrop = (e: React.DragEvent) => {
-    if (!allowImageUploads) return
-    e.preventDefault()
-    addImages(Array.from(e.dataTransfer.files))
+    if (titleRef.current) titleRef.current.textContent = ''
+    if (descriptionRef.current) descriptionRef.current.textContent = ''
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -366,6 +336,7 @@ export function IssueCreationModal({
         images: images.map(image => image.file),
       }
       await onSubmit(submitData)
+      resetDraft()
       onClose()
     } catch (error) {
       console.error('Failed to create issue:', error)
@@ -383,6 +354,38 @@ export function IssueCreationModal({
   const handleDescriptionInput = (e: React.FormEvent<HTMLDivElement>) => {
     const text = e.currentTarget.textContent || ''
     setFormData(prev => ({ ...prev, description: text }))
+  }
+
+  const addImages = (files: File[]) => {
+    const validationError = validateIssueImages([...images.map(image => image.file), ...files])
+    if (validationError) {
+      setError(validationError)
+      return
+    }
+    setError(null)
+    setImages(prev => [
+      ...prev,
+      ...files.map(file => ({ file, previewUrl: URL.createObjectURL(file) })),
+    ])
+  }
+
+  const removeImage = (index: number) => {
+    URL.revokeObjectURL(images[index].previewUrl)
+    setImages(prev => prev.filter((_, i) => i !== index))
+  }
+
+  const handlePaste = (e: React.ClipboardEvent) => {
+    if (!allowImageUploads) return
+    const files = Array.from(e.clipboardData.files).filter(file => file.type.startsWith('image/'))
+    if (files.length === 0) return
+    e.preventDefault()
+    addImages(files)
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    if (!allowImageUploads) return
+    e.preventDefault()
+    addImages(Array.from(e.dataTransfer.files))
   }
 
   const handleTitleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -618,15 +621,16 @@ export function IssueCreationModal({
                   >
                     {selectedState ? (
                       <>
-                        <div
-                          className="w-3 h-3 rounded-full"
-                          style={{ backgroundColor: selectedState.color }}
+                        <StateIcon
+                          type={selectedState.type}
+                          color={selectedState.color}
+                          name={selectedState.name}
                         />
                         <span>{selectedState.name}</span>
                       </>
                     ) : (
                       <>
-                        <TodoIcon />
+                        <StateIcon type="unstarted" color="#e2e2e2" name="Todo" />
                         <span>Status</span>
                       </>
                     )}
@@ -652,9 +656,10 @@ export function IssueCreationModal({
                           }}
                           className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-accent transition-colors"
                         >
-                          <div
-                            className="w-3 h-3 rounded-full"
-                            style={{ backgroundColor: state.color }}
+                          <StateIcon
+                            type={state.type}
+                            color={state.color}
+                            name={state.name}
                           />
                           <span>{state.name}</span>
                         </button>

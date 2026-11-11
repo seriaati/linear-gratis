@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase'
-import { decryptToken } from '@/lib/encryption'
+import { decryptAndRotateTokenIfNeeded } from '@/lib/encryption-rotation'
+import { authorisePublicView } from '@/lib/public-view-auth'
 
 interface RouteContext {
   params: Promise<{
@@ -15,18 +16,15 @@ export async function GET(
   try {
     const { slug } = await context.params
 
-    // Get the view from the database
-    const { data: view, error: viewError } = await supabaseAdmin
-      .from('public_views')
-      .select('*')
-      .eq('slug', slug)
-      .eq('is_active', true)
-      .single()
+    // Auth first: is_active + expiry + password cookie.
+    const auth = await authorisePublicView(slug, request)
+    if (!auth.ok) return auth.response
+    const view = auth.view
 
-    if (viewError || !view) {
+    if (view.show_project_updates === false) {
       return NextResponse.json(
-        { error: 'View not found' },
-        { status: 404 }
+        { error: 'Project updates are disabled for this view' },
+        { status: 403 }
       )
     }
 
@@ -53,7 +51,10 @@ export async function GET(
     }
 
     // Decrypt the Linear API token
-    const decryptedToken = decryptToken(profile.linear_api_token)
+    const decryptedToken = await decryptAndRotateTokenIfNeeded(
+      profile.linear_api_token,
+      { userId: view.user_id, admin: supabaseAdmin },
+    )
 
     // Fetch project updates from Linear
     const query = `
@@ -75,7 +76,6 @@ export async function GET(
                 name
                 displayName
                 avatarUrl
-                email
               }
               diffMarkdown
               isDiffHidden
@@ -128,7 +128,6 @@ export async function GET(
                 name: string
                 displayName: string
                 avatarUrl?: string
-                email: string
               }
               diffMarkdown?: string
               isDiffHidden: boolean

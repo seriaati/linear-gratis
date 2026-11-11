@@ -47,7 +47,7 @@ export function LoginForm({ signupsDisabled }: { signupsDisabled: boolean }) {
       <div className="min-h-screen flex items-center justify-center p-6">
         <Card className="w-full max-w-md">
           <CardHeader>
-            <CardTitle>Check your email</CardTitle>
+            <CardTitle><h1>Check your email</h1></CardTitle>
             <CardDescription>
               We&apos;ve sent a magic link to {email}. Click the link in the email to sign in.
             </CardDescription>
@@ -70,7 +70,7 @@ export function LoginForm({ signupsDisabled }: { signupsDisabled: boolean }) {
     <div className="min-h-screen flex items-center justify-center p-6">
       <Card className="w-full max-w-md">
         <CardHeader>
-          <CardTitle>Sign in to your account</CardTitle>
+          <CardTitle><h1>Sign in to your account</h1></CardTitle>
           <CardDescription>
             {signupsDisabled
               ? 'Sign in to access your Linear integration'

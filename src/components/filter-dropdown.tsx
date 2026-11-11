@@ -3,6 +3,8 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { LinearIssue } from '@/app/api/linear/issues/route'
 import { Checkbox } from '@/components/ui/checkbox'
+import { PriorityIcon } from '@/components/priority-icon'
+import { StateIcon, StatusCategoryIcon } from '@/components/state-icon'
 
 export type FilterState = {
   search: string
@@ -29,63 +31,6 @@ interface FilterDropdownProps {
   onFiltersChange: (filters: FilterState) => void
   filterOptions: FilterOptions
   triggerRef: React.RefObject<HTMLButtonElement | null>
-}
-
-const getPriorityIcon = (priority: number) => {
-  if (priority === 0) {
-    return (
-      <svg className="w-3.5 h-3.5 text-muted-foreground/70" viewBox="0 0 16 16" fill="currentColor">
-        <rect x="1.5" y="7.25" width="3" height="1.5" rx="0.5" opacity="0.9"></rect>
-        <rect x="6.5" y="7.25" width="3" height="1.5" rx="0.5" opacity="0.9"></rect>
-        <rect x="11.5" y="7.25" width="3" height="1.5" rx="0.5" opacity="0.9"></rect>
-      </svg>
-    )
-  }
-
-  if (priority >= 3) {
-    return (
-      <svg className="w-3.5 h-3.5 text-orange-500" viewBox="0 0 16 16" fill="currentColor">
-        <path fillRule="evenodd" d="M3.741 14.5h8.521c1.691 0 2.778-1.795 1.993-3.293l-4.26-8.134c-.842-1.608-3.144-1.608-3.986 0l-4.26 8.134C.962 12.705 2.05 14.5 3.74 14.5ZM8 3.368a.742.742 0 0 0-.663.402l-4.26 8.134A.75.75 0 0 0 3.741 13H8V3.367Z" clipRule="evenodd"></path>
-      </svg>
-    )
-  }
-
-  return (
-    <svg className="w-3.5 h-3.5 text-blue-500" viewBox="0 0 16 16" fill="currentColor">
-      <rect x="1.5" y="8" width="3" height="6" rx="1"></rect>
-      <rect x="6.5" y="5" width="3" height="9" rx="1"></rect>
-      <rect x="11.5" y="2" width="3" height="12" rx="1"></rect>
-    </svg>
-  )
-}
-
-const getStateIcon = (stateType: string, color: string) => {
-  const strokeColor = color || '#9ca3af'
-
-  if (stateType === 'completed') {
-    return (
-      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-        <circle cx="7" cy="7" r="6" fill={strokeColor} stroke={strokeColor} strokeWidth="1.5"></circle>
-        <path d="M4.5 7l2 2 3-3" stroke="white" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round"></path>
-      </svg>
-    )
-  }
-
-  if (stateType === 'started') {
-    return (
-      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-        <circle cx="7" cy="7" r="6" fill="none" stroke={strokeColor} strokeWidth="1.5" strokeDasharray="3.14 0" strokeDashoffset="-0.7"></circle>
-        <circle className="progress" cx="7" cy="7" r="2" fill="none" stroke={strokeColor} strokeWidth="4" strokeDasharray="12.189379495928398 24.378758991856795" strokeDashoffset="6.094689747964199" transform="rotate(-90 7 7)"></circle>
-      </svg>
-    )
-  }
-
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-      <circle cx="7" cy="7" r="6" fill="none" stroke={strokeColor} strokeWidth="1.5" strokeDasharray="3.14 0" strokeDashoffset="-0.7"></circle>
-      <circle className="progress" cx="7" cy="7" r="2" fill="none" stroke={strokeColor} strokeWidth="4" strokeDasharray="12.189379495928398 24.378758991856795" strokeDashoffset="12.189379495928398" transform="rotate(-90 7 7)"></circle>
-    </svg>
-  )
 }
 
 export function FilterDropdown({
@@ -293,9 +238,9 @@ export function FilterDropdown({
             >
               <div className="flex w-full items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <svg className="w-4 h-4 text-muted-foreground" viewBox="0 0 14 14" fill="lch(64.892% 1.933 272 / 1)">
-                    <path d="M13.9408 7.91426L11.9576 7.65557C11.9855 7.4419 12 7.22314 12 7C12 6.77686 11.9855 6.5581 11.9576 6.34443L13.9408 6.08573C13.9799 6.38496 14 6.69013 14 7C14 7.30987 13.9799 7.61504 13.9408 7.91426ZM13.4688 4.32049C13.2328 3.7514 12.9239 3.22019 12.5538 2.73851L10.968 3.95716C11.2328 4.30185 11.4533 4.68119 11.6214 5.08659L13.4688 4.32049ZM11.2615 1.4462L10.0428 3.03204C9.69815 2.76716 9.31881 2.54673 8.91341 2.37862L9.67951 0.531163C10.2486 0.767153 10.7798 1.07605 11.2615 1.4462ZM7.91426 0.0591659L7.65557 2.04237C7.4419 2.01449 7.22314 2 7 2C6.77686 2 6.5581 2.01449 6.34443 2.04237L6.08574 0.059166C6.38496 0.0201343 6.69013 0 7 0C7.30987 0 7.61504 0.0201343 7.91426 0.0591659ZM4.32049 0.531164L5.08659 2.37862C4.68119 2.54673 4.30185 2.76716 3.95716 3.03204L2.73851 1.4462C3.22019 1.07605 3.7514 0.767153 4.32049 0.531164ZM1.4462 2.73851L3.03204 3.95716C2.76716 4.30185 2.54673 4.68119 2.37862 5.08659L0.531164 4.32049C0.767153 3.7514 1.07605 3.22019 1.4462 2.73851ZM0.0591659 6.08574C0.0201343 6.38496 0 6.69013 0 7C0 7.30987 0.0201343 7.61504 0.059166 7.91426L2.04237 7.65557C2.01449 7.4419 2 7.22314 2 7C2 6.77686 2.01449 6.5581 2.04237 6.34443L0.0591659 6.08574ZM0.531164 9.67951L2.37862 8.91341C2.54673 9.31881 2.76716 9.69815 3.03204 10.0428L1.4462 11.2615C1.07605 10.7798 0.767153 10.2486 0.531164 9.67951ZM2.73851 12.5538L3.95716 10.968C4.30185 11.2328 4.68119 11.4533 5.08659 11.6214L4.32049 13.4688C3.7514 13.2328 3.22019 12.9239 2.73851 12.5538ZM6.08574 13.9408L6.34443 11.9576C6.5581 11.9855 6.77686 12 7 12C7.22314 12 7.4419 11.9855 7.65557 11.9576L7.91427 13.9408C7.61504 13.9799 7.30987 14 7 14C6.69013 14 6.38496 13.9799 6.08574 13.9408ZM9.67951 13.4688L8.91341 11.6214C9.31881 11.4533 9.69815 11.2328 10.0428 10.968L11.2615 12.5538C10.7798 12.9239 10.2486 13.2328 9.67951 13.4688ZM12.5538 11.2615L10.968 10.0428C11.2328 9.69815 11.4533 9.31881 11.6214 8.91341L13.4688 9.67951C13.2328 10.2486 12.924 10.7798 12.5538 11.2615Z" stroke="none"></path>
-                  </svg>
+                  <span className="text-muted-foreground">
+                    <StatusCategoryIcon size={16} />
+                  </span>
                   <span className="text-sm font-medium text-foreground">Status</span>
                 </div>
                 <div className="text-xs text-muted-foreground">
@@ -333,28 +278,30 @@ export function FilterDropdown({
 
 
           {/* Priority filter */}
-          <li
-            role="option"
-            data-list-row="true"
-            aria-selected={hoverSections.has('priority')}
-            className="relative flex cursor-pointer select-none items-center px-2 py-1.5 text-sm outline-none hover:bg-accent focus:bg-accent"
-            onMouseEnter={(e) => handleSectionMouseEnter('priority', e)}
-            onMouseLeave={() => handleSectionMouseLeave('priority')}
-          >
-            <div className="flex w-full items-center justify-between">
-              <div className="flex items-center gap-2">
-                <svg className="w-4 h-4 text-muted-foreground" viewBox="0 0 16 16" fill="lch(64.892% 1.933 272 / 1)">
-                  <rect x="1" y="8" width="3" height="6" rx="1"></rect>
-                  <rect x="6" y="5" width="3" height="9" rx="1"></rect>
-                  <rect x="11" y="2" width="3" height="12" rx="1"></rect>
-                </svg>
-                <span className="text-sm font-medium text-foreground">Priority</span>
+          {filterOptions.priorities.length > 0 && (
+            <li
+              role="option"
+              data-list-row="true"
+              aria-selected={hoverSections.has('priority')}
+              className="relative flex cursor-pointer select-none items-center px-2 py-1.5 text-sm outline-none hover:bg-accent focus:bg-accent"
+              onMouseEnter={(e) => handleSectionMouseEnter('priority', e)}
+              onMouseLeave={() => handleSectionMouseLeave('priority')}
+            >
+              <div className="flex w-full items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <svg className="w-4 h-4 text-muted-foreground" viewBox="0 0 16 16" fill="lch(64.892% 1.933 272 / 1)">
+                    <rect x="1" y="8" width="3" height="6" rx="1"></rect>
+                    <rect x="6" y="5" width="3" height="9" rx="1"></rect>
+                    <rect x="11" y="2" width="3" height="12" rx="1"></rect>
+                  </svg>
+                  <span className="text-sm font-medium text-foreground">Priority</span>
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  ▶
+                </div>
               </div>
-              <div className="text-xs text-muted-foreground">
-                ▶
-              </div>
-            </div>
-          </li>
+            </li>
+          )}
 
 
           {/* Labels filter */}
@@ -456,7 +403,11 @@ export function FilterDropdown({
                     {/* Content container */}
                     <div className="flex items-center justify-between flex-1 min-w-0">
                       <div className="flex items-center gap-2 min-w-0">
-                        {getStateIcon(status.type, status.color)}
+                        <StateIcon
+                          type={status.type}
+                          color={status.color}
+                          name={status.name}
+                        />
                         <span className="text-sm font-medium text-foreground truncate">{status.name}</span>
                       </div>
 
@@ -535,7 +486,7 @@ export function FilterDropdown({
                   {/* Content container */}
                   <div className="flex items-center justify-between flex-1 min-w-0">
                     <div className="flex items-center gap-2 min-w-0">
-                      {getPriorityIcon(priority.value)}
+                      <PriorityIcon priority={priority.value} priorityLabel={priority.label} />
                       <span className="text-sm font-medium text-foreground truncate">{priority.label}</span>
                     </div>
                   </div>
@@ -616,12 +567,14 @@ export function generateFilterOptions(issues: LinearIssue[]): FilterOptions {
     ).values()
   )
 
+  // Linear's real priority schema: 0 None, 1 Urgent, 2 High, 3 Medium, 4 Low.
+  // (Matches priority-icon.tsx; ordered Urgent → No priority.)
   const priorities = [
+    { value: 1, label: 'Urgent' },
+    { value: 2, label: 'High' },
+    { value: 3, label: 'Medium' },
+    { value: 4, label: 'Low' },
     { value: 0, label: 'No priority' },
-    { value: 1, label: 'Low' },
-    { value: 2, label: 'Medium' },
-    { value: 3, label: 'High' },
-    { value: 4, label: 'Urgent' },
   ].filter(priority =>
     issues.some(issue => issue.priority === priority.value)
   )

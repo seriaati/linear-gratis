@@ -2,12 +2,15 @@
 
 import { useMemo } from 'react'
 import { RoadmapCard } from './roadmap-card'
+import { StateIcon } from '@/components/state-icon'
 import type { RoadmapIssue } from '@/lib/linear'
+import { sortRoadmapIssues, type RoadmapSort } from '@/lib/roadmap-sorting'
 import type { KanbanColumn } from '@/lib/supabase'
 
 interface KanbanViewProps {
   issues: RoadmapIssue[]
   columns: KanbanColumn[]
+  sort?: RoadmapSort
   roadmapSlug: string
   voteCounts: Record<string, number>
   commentCounts: Record<string, number>
@@ -22,41 +25,25 @@ interface KanbanViewProps {
   onVote?: (issueId: string, voted: boolean, newCount: number) => void
 }
 
-// Column header icons based on column key
+// Roadmap columns are presentation buckets rather than Linear states, so map
+// their keys to the closest Linear workflow category and reuse StateIcon.
 const ColumnIcon = ({ columnKey }: { columnKey: string }) => {
   switch (columnKey) {
     case 'planned':
-      return (
-        <svg className="h-4 w-4 text-blue-500" viewBox="0 0 16 16" fill="currentColor">
-          <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="1.5" />
-        </svg>
-      )
+      return <StateIcon type="unstarted" color="#3b82f6" name="Planned" size={16} />
     case 'in_progress':
-      return (
-        <svg className="h-4 w-4 text-yellow-500" viewBox="0 0 16 16" fill="currentColor">
-          <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="1.5" />
-          <path d="M8 8 L8 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-        </svg>
-      )
+      return <StateIcon type="started" color="#eab308" name="In progress" size={16} />
     case 'shipped':
-      return (
-        <svg className="h-4 w-4 text-green-500" viewBox="0 0 16 16" fill="currentColor">
-          <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="1.5" />
-          <path d="M5 8 L7 10 L11 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-        </svg>
-      )
+      return <StateIcon type="completed" color="#22c55e" name="Shipped" size={16} />
     default:
-      return (
-        <svg className="h-4 w-4 text-muted-foreground" viewBox="0 0 16 16" fill="currentColor">
-          <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="1.5" />
-        </svg>
-      )
+      return <StateIcon type="unstarted" color="currentColor" size={16} />
   }
 }
 
 export function KanbanView({
   issues,
   columns,
+  sort = 'votes',
   roadmapSlug,
   voteCounts,
   commentCounts,
@@ -88,21 +75,17 @@ export function KanbanView({
       }
     })
 
-    // Sort issues within each column by vote count (descending)
-    Object.keys(groups).forEach((key) => {
-      groups[key].sort((a, b) => {
-        const aVotes = voteCounts[a.id] || 0
-        const bVotes = voteCounts[b.id] || 0
-        return bVotes - aVotes
-      })
-    })
+    for (const key of Object.keys(groups)) {
+      groups[key] = sortRoadmapIssues(groups[key], sort, voteCounts)
+    }
 
     return groups
-  }, [issues, columns, voteCounts])
+  }, [issues, columns, voteCounts, sort])
 
   return (
     <div
-      className="w-full pb-4 flex gap-4 overflow-x-auto lg:grid lg:overflow-visible"
+      aria-label="Roadmap board"
+      className="-mx-2 flex w-[calc(100%+1rem)] snap-x snap-mandatory gap-2 overflow-x-auto overscroll-x-contain scroll-px-2 px-2 pb-4 touch-pan-x sm:mx-0 sm:w-full sm:gap-4 sm:px-0 lg:grid lg:overflow-visible"
       style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))` }}
     >
       {columns.map((column) => {
@@ -111,10 +94,10 @@ export function KanbanView({
         return (
           <div
             key={column.key}
-            className="flex-shrink-0 w-72 lg:w-auto lg:flex-shrink lg:min-w-0 bg-muted/30 rounded-lg"
+            className="w-[calc(100vw-1.5rem)] max-w-72 flex-shrink-0 snap-start rounded-lg bg-muted/30 lg:w-auto lg:max-w-none lg:flex-shrink lg:min-w-0"
           >
             {/* Column header */}
-            <div className="sticky top-0 bg-muted/50 backdrop-blur-sm rounded-t-lg border-b border-border/50 px-3 py-2.5 z-10">
+            <div className="sticky top-0 z-10 rounded-t-lg border-b border-border/50 bg-muted/90 px-3 py-2.5 backdrop-blur-sm">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <ColumnIcon columnKey={column.key} />
@@ -129,7 +112,7 @@ export function KanbanView({
             </div>
 
             {/* Column content */}
-            <div className="p-2 space-y-2 max-h-[calc(100vh-280px)] overflow-y-auto">
+            <div className="space-y-2 p-2 lg:max-h-[calc(100dvh-14rem)] lg:overflow-y-auto">
               {columnIssues.length === 0 ? (
                 <div className="py-8 text-center text-xs text-muted-foreground">
                   No items

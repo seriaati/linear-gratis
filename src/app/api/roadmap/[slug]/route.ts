@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
 import type { Roadmap, KanbanColumn } from '@/lib/supabase';
-import { decryptToken } from '@/lib/encryption';
+import { decryptAndRotateTokenIfNeeded } from '@/lib/encryption-rotation';
 import { fetchRoadmapIssues, type RoadmapIssue } from '@/lib/linear';
-import bcrypt from 'bcryptjs';
+import { redactRoadmapIssue } from '@/lib/public-redaction';
+import {
+  authoriseRoadmap,
+  setRoadmapAccessCookie,
+} from '@/lib/roadmap-auth';
 
 type VoteCount = {
   issue_id: string;
@@ -48,48 +52,10 @@ export async function GET(
 ) {
   try {
     const { slug } = await params;
+    const auth = await authoriseRoadmap(slug, request);
+    if (!auth.ok) return auth.response;
 
-    if (!slug) {
-      return NextResponse.json(
-        { error: 'Slug parameter is required' },
-        { status: 400 }
-      );
-    }
-
-    // Check if roadmap exists and is active
-    const { data: roadmapData, error: roadmapError } = await supabaseAdmin
-      .from('roadmaps')
-      .select('*')
-      .eq('slug', slug)
-      .eq('is_active', true)
-      .single();
-
-    if (roadmapError || !roadmapData) {
-      return NextResponse.json(
-        { error: 'Roadmap not found or inactive' },
-        { status: 404 }
-      );
-    }
-
-    const roadmap = roadmapData as Roadmap;
-
-    // Check if roadmap has expired
-    if (roadmap.expires_at && new Date(roadmap.expires_at) < new Date()) {
-      return NextResponse.json(
-        { error: 'This roadmap has expired' },
-        { status: 410 }
-      );
-    }
-
-    // Check if roadmap requires password
-    if (roadmap.password_protected) {
-      return NextResponse.json(
-        { error: 'Password required', requiresPassword: true },
-        { status: 401 }
-      );
-    }
-
-    return await fetchRoadmapData(roadmap);
+    return await fetchRoadmapData(auth.roadmap);
 
   } catch (error) {
     console.error('Roadmap API error:', error);
@@ -118,7 +84,8 @@ export async function POST(
       );
     }
 
-    // Check if roadmap exists and is active
+    // Load the row. POST owns its own flow so it can set the cookie after
+    // validating the password.
     const { data: roadmapData, error: roadmapError } = await supabaseAdmin
       .from('roadmaps')
       .select('*')
@@ -135,26 +102,7 @@ export async function POST(
 
     const roadmap = roadmapData as Roadmap;
 
-    // Check password if roadmap is password protected
-    if (roadmap.password_protected) {
-      if (!password) {
-        return NextResponse.json(
-          { error: 'Password required', requiresPassword: true },
-          { status: 401 }
-        );
-      }
-
-      // Check password against hash
-      const isPasswordValid = await bcrypt.compare(password, roadmap.password_hash || '');
-      if (!isPasswordValid) {
-        return NextResponse.json(
-          { error: 'Invalid password', requiresPassword: true },
-          { status: 401 }
-        );
-      }
-    }
-
-    // Check if roadmap has expired
+    // Expiry BEFORE password so expired rows never run bcrypt.
     if (roadmap.expires_at && new Date(roadmap.expires_at) < new Date()) {
       return NextResponse.json(
         { error: 'This roadmap has expired' },
@@ -162,7 +110,36 @@ export async function POST(
       );
     }
 
-    return await fetchRoadmapData(roadmap);
+    if (!roadmap.password_protected || !roadmap.password_hash) {
+      return NextResponse.json(
+        { error: 'Roadmap is not password protected' },
+        { status: 400 }
+      );
+    }
+
+    if (!password) {
+      return NextResponse.json(
+        { error: 'Password required', requiresPassword: true },
+        { status: 401 }
+      );
+    }
+
+    const bcrypt = (await import('bcryptjs')).default;
+    const isPasswordValid = await bcrypt.compare(password, roadmap.password_hash);
+    if (!isPasswordValid) {
+      return NextResponse.json(
+        { error: 'Invalid password', requiresPassword: true },
+        { status: 401 }
+      );
+    }
+
+    const response = await fetchRoadmapData(roadmap);
+    // Only set the access cookie on a 2xx response so we do not vouch for a
+    // caller whose Linear fetch blew up.
+    if (response.status >= 200 && response.status < 300) {
+      setRoadmapAccessCookie(response, roadmap);
+    }
+    return response;
 
   } catch (error) {
     console.error('Roadmap password validation error:', error);
@@ -192,7 +169,10 @@ async function fetchRoadmapData(roadmap: Roadmap) {
   }
 
   // Decrypt the token and fetch issues from Linear API
-  const decryptedToken = decryptToken(profileData.linear_api_token);
+  const decryptedToken = await decryptAndRotateTokenIfNeeded(
+    profileData.linear_api_token,
+    { userId: roadmap.user_id, admin: supabaseAdmin },
+  );
 
   if (!roadmap.project_ids || roadmap.project_ids.length === 0) {
     return NextResponse.json(
@@ -275,7 +255,7 @@ async function fetchRoadmapData(roadmap: Roadmap) {
       require_email_for_comments: roadmap.require_email_for_comments,
       password_protected: roadmap.password_protected,
     },
-    issues: issuesResult.issues,
+    issues: issuesResult.issues.map((issue) => redactRoadmapIssue(issue, roadmap)),
     voteCounts,
     commentCounts,
     projects: Array.from(projectMap.values()),

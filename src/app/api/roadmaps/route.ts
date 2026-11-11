@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import type { Roadmap } from '@/lib/supabase';
+import { getActiveOrganisationIdAdmin } from '@/lib/organisations';
+import { getActiveConnectionIdForOrg } from '@/lib/linear-connection';
 import bcrypt from 'bcryptjs';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -30,11 +32,12 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
     }
 
-    // Fetch user's roadmaps
+    // Fetch only the caller's roadmaps. supabaseAdmin bypasses RLS, so the
+    // created_by filter here is load-bearing.
     const { data: roadmaps, error } = await supabaseAdmin
       .from('roadmaps')
       .select('*')
-      .eq('user_id', user.id)
+      .eq('created_by', user.id)
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -85,7 +88,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!body.project_ids || body.project_ids.length === 0) {
+    const linearProjectIds = body.linear_project_ids ?? body.project_ids;
+    if (!linearProjectIds || linearProjectIds.length === 0) {
       return NextResponse.json(
         { error: 'At least one project must be selected' },
         { status: 400 }
@@ -107,11 +111,27 @@ export async function POST(request: NextRequest) {
       passwordHash = await bcrypt.hash(body.password, 10);
     }
 
+    const organisationId = await getActiveOrganisationIdAdmin(supabaseAdmin, user.id);
+    if (!organisationId) {
+      return NextResponse.json(
+        { error: 'No active organisation for this user' },
+        { status: 500 }
+      );
+    }
+
+    // Stamp linear_connection_id so the composite FK invariant holds and so
+    // downstream Linear API calls can resolve the right token via the
+    // connection rather than the legacy profile path.
+    const linearConnectionId = await getActiveConnectionIdForOrg(supabaseAdmin, organisationId);
+
     // Create the roadmap
     const { data: roadmap, error } = await supabaseAdmin
       .from('roadmaps')
       .insert({
         user_id: user.id,
+        created_by: user.id,
+        organisation_id: organisationId,
+        linear_connection_id: linearConnectionId,
         name: body.name,
         slug: body.slug,
         title: body.title,
@@ -123,7 +143,8 @@ export async function POST(request: NextRequest) {
           { key: 'in_progress', label: 'In progress', state_types: ['started'] },
           { key: 'shipped', label: 'Shipped', state_types: ['completed'] },
         ],
-        project_ids: body.project_ids,
+        project_ids: linearProjectIds,
+        linear_project_ids: linearProjectIds,
         show_item_descriptions: body.show_item_descriptions ?? true,
         show_item_dates: body.show_item_dates ?? true,
         show_vote_counts: body.show_vote_counts ?? true,

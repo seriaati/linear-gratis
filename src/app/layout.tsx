@@ -90,7 +90,12 @@ export default function RootLayout({
           dangerouslySetInnerHTML={{
             __html: `
               try {
-                if (localStorage.getItem('linear-integration-theme') === 'dark' || (!('linear-integration-theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+                const requestedTheme = new URLSearchParams(window.location.search).get('theme');
+                const theme = requestedTheme === 'dark' || requestedTheme === 'light'
+                  ? requestedTheme
+                  : localStorage.getItem('linear-integration-theme');
+
+                if (theme === 'dark' || (!theme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
                   document.documentElement.classList.add('dark')
                 } else {
                   document.documentElement.classList.remove('dark')
@@ -110,7 +115,23 @@ export default function RootLayout({
           <AuthProvider>
             {children}
           </AuthProvider>
-          <Toaster richColors position="bottom-right" />
+          <Toaster
+            richColors
+            position="bottom-center"
+            offset={{ bottom: 'calc(16px + env(safe-area-inset-bottom))' }}
+            mobileOffset={{
+              left: 12,
+              right: 12,
+              bottom: 'calc(12px + env(safe-area-inset-bottom))',
+            }}
+            toastOptions={{
+              classNames: {
+                toast: 'linear-toast',
+                title: 'linear-toast-title',
+                description: 'linear-toast-description',
+              },
+            }}
+          />
         </ThemeProvider>
       </body>
     </html>

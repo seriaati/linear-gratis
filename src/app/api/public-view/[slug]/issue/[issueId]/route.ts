@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { authorisePublicView } from '@/lib/public-view-auth';
+import { decryptAndRotateTokenIfNeeded } from '@/lib/encryption-rotation';
+import { getActiveConnectionIdForOrg, getTokenForConnection } from '@/lib/linear-connection';
 import { supabaseAdmin } from '@/lib/supabase';
-import { decryptToken } from '@/lib/encryption';
+import type { PublicView } from '@/lib/supabase';
+
+const LINEAR_API_URL = 'https://api.linear.app/graphql';
+const ISSUE_IDENTIFIER_PATTERN = /\b[A-Z][A-Z0-9]*-\d+\b/g;
+const MAX_REFERENCED_ISSUES = 100;
 
 export type IssueComment = {
   id: string;
@@ -33,8 +40,9 @@ export type IssueHistory = {
   };
   fromPriority?: number;
   toPriority?: number;
-  user: {
+  user?: {
     name: string;
+    avatarUrl?: string;
   };
 };
 
@@ -45,6 +53,7 @@ export type IssueDetail = {
   description?: string;
   priority: number;
   priorityLabel: string;
+  estimate?: number;
   url: string;
   state: {
     id: string;
@@ -55,6 +64,7 @@ export type IssueDetail = {
   assignee?: {
     id: string;
     name: string;
+    avatarUrl?: string;
   };
   labels: Array<{
     id: string;
@@ -65,7 +75,205 @@ export type IssueDetail = {
   updatedAt: string;
   comments: IssueComment[];
   history: IssueHistory[];
+  referencedIssues: Record<string, ReferencedIssue>;
 };
+
+export type ReferencedIssue = {
+  id: string;
+  identifier: string;
+  title: string;
+  estimate?: number;
+  url: string;
+  state: {
+    id: string;
+    name: string;
+    color: string;
+    type: string;
+  };
+};
+
+function extractReferencedIssueIdentifiers(
+  markdown: string | undefined,
+  currentIdentifier: string,
+): string[] {
+  if (!markdown) return [];
+
+  const identifiers = new Set<string>();
+  for (const match of markdown.matchAll(ISSUE_IDENTIFIER_PATTERN)) {
+    const identifier = match[0].toUpperCase();
+    if (identifier === currentIdentifier.toUpperCase()) continue;
+    identifiers.add(identifier);
+    if (identifiers.size >= MAX_REFERENCED_ISSUES) break;
+  }
+
+  return Array.from(identifiers);
+}
+
+function issueMatchesAllowedLabels(
+  view: PublicView,
+  labels: Array<{ id: string }>,
+): boolean {
+  if (!view.allowed_label_ids || view.allowed_label_ids.length === 0) {
+    return true;
+  }
+
+  const allowedLabels = new Set(view.allowed_label_ids);
+  return labels.some((label) => allowedLabels.has(label.id));
+}
+
+async function resolveLinearTokenForView(view: PublicView): Promise<string | null> {
+  if (view.linear_connection_id) {
+    return getTokenForConnection(view.linear_connection_id);
+  }
+
+  const connectionId = view.organisation_id
+    ? await getActiveConnectionIdForOrg(supabaseAdmin, view.organisation_id)
+    : null;
+  if (connectionId) {
+    await supabaseAdmin
+      .from('public_views')
+      .update({ linear_connection_id: connectionId })
+      .eq('id', view.id)
+      .is('linear_connection_id', null);
+
+    return getTokenForConnection(connectionId);
+  }
+
+  // Legacy fallback while older deployments still store the token on profiles
+  // and have not applied the organisation_linear_connections migration.
+  const { data: profile } = await supabaseAdmin
+    .from('profiles')
+    .select('linear_api_token')
+    .eq('id', view.user_id)
+    .single();
+
+  if (!profile?.linear_api_token) return null;
+
+  try {
+    return await decryptAndRotateTokenIfNeeded(profile.linear_api_token, {
+      userId: view.user_id,
+      admin: supabaseAdmin,
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function fetchReferencedIssues(
+  apiToken: string,
+  identifiers: string[],
+  view: PublicView,
+): Promise<Record<string, ReferencedIssue>> {
+  if (identifiers.length === 0) return {};
+
+  const query = `
+    query ReferencedIssues($issueIds: [ID!], $first: Int!) {
+      issues(first: $first, filter: { id: { in: $issueIds } }) {
+        nodes {
+          id
+          identifier
+          title
+          estimate
+          url
+          team {
+            id
+          }
+          project {
+            id
+          }
+          state {
+            id
+            name
+            color
+            type
+          }
+          labels {
+            nodes {
+              id
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const response = await fetch(LINEAR_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: apiToken.trim(),
+    },
+    body: JSON.stringify({
+      query,
+      variables: {
+        issueIds: identifiers,
+        first: identifiers.length,
+      },
+    }),
+  });
+
+  if (!response.ok) return {};
+
+  const result = (await response.json()) as {
+    data?: {
+      issues?: {
+        nodes: Array<{
+          id: string;
+          identifier: string;
+          title: string;
+          estimate?: number;
+          url: string;
+          team?: { id: string } | null;
+          project?: { id: string } | null;
+          state: {
+            id: string;
+            name: string;
+            color: string;
+            type: string;
+          };
+          labels: {
+            nodes: Array<{ id: string }>;
+          };
+        }>;
+      };
+    };
+    errors?: Array<{ message: string }>;
+  };
+
+  if (result.errors || !result.data?.issues?.nodes) return {};
+
+  const references: Record<string, ReferencedIssue> = {};
+  for (const referencedIssue of result.data.issues.nodes) {
+    const issueBelongsToView = view.project_id
+      ? referencedIssue.project?.id === view.project_id
+      : view.team_id
+        ? referencedIssue.team?.id === view.team_id
+        : false;
+
+    if (!issueBelongsToView) continue;
+    if (view.excluded_issue_ids?.includes(referencedIssue.id)) continue;
+    if (view.excluded_issue_ids?.includes(referencedIssue.identifier)) continue;
+    if (
+      view.allowed_statuses &&
+      view.allowed_statuses.length > 0 &&
+      !view.allowed_statuses.includes(referencedIssue.state.name)
+    ) {
+      continue;
+    }
+    if (!issueMatchesAllowedLabels(view, referencedIssue.labels.nodes)) continue;
+
+    references[referencedIssue.identifier.toUpperCase()] = {
+      id: referencedIssue.id,
+      identifier: referencedIssue.identifier,
+      title: referencedIssue.title,
+      estimate: view.show_priorities !== false ? referencedIssue.estimate : undefined,
+      url: referencedIssue.url,
+      state: referencedIssue.state,
+    };
+  }
+
+  return references;
+}
 
 export async function GET(
   request: NextRequest,
@@ -74,56 +282,43 @@ export async function GET(
   try {
     const { slug, issueId } = await params;
 
-    if (!slug || !issueId) {
+    if (!issueId) {
       return NextResponse.json(
-        { error: 'Slug and issueId parameters are required' },
+        { error: 'issueId parameter is required' },
         { status: 400 }
       );
     }
 
-    // Check if view exists and is active
-    const { data: viewData, error: viewError } = await supabaseAdmin
-      .from('public_views')
-      .select('*')
-      .eq('slug', slug)
-      .eq('is_active', true)
-      .single();
+    // Auth first: is_active + expiry + password cookie.
+    const auth = await authorisePublicView(slug, request);
+    if (!auth.ok) return auth.response;
+    const viewData = auth.view;
 
-    if (viewError || !viewData) {
+    // Respect the view's issue restrictions. Without these checks, any
+    // visitor who knows the slug + issueId could pull an excluded issue or
+    // an issue outside the allowed statuses.
+    if (viewData.excluded_issue_ids?.includes(issueId)) {
       return NextResponse.json(
-        { error: 'Public view not found or inactive' },
+        { error: 'Issue not found' },
         { status: 404 }
       );
     }
 
-    // Check if view has expired
-    if (viewData.expires_at && new Date(viewData.expires_at) < new Date()) {
-      return NextResponse.json(
-        { error: 'This public view has expired' },
-        { status: 410 }
-      );
-    }
-
-    // Get the user's Linear token
-    const { data: profileData, error: profileError } = await supabaseAdmin
-      .from('profiles')
-      .select('linear_api_token')
-      .eq('id', viewData.user_id)
-      .single();
-
-    if (profileError || !profileData?.linear_api_token) {
+    const decryptedToken = await resolveLinearTokenForView(viewData);
+    if (!decryptedToken) {
       return NextResponse.json(
         { error: 'Unable to load data - Linear API token not found' },
         { status: 500 }
       );
     }
 
-    // Decrypt the token
-    const decryptedToken = decryptToken(profileData.linear_api_token);
+    // Gate comments and history via GraphQL @include. Keeps the query text
+    // static (cacheable, readable) while view settings control the flags.
+    const includeComments = (viewData.show_comments ?? false) || (viewData.show_activity ?? false);
+    const includeActivity = viewData.show_activity ?? false;
 
-    // Fetch issue details from Linear using GraphQL
     const query = `
-      query IssueDetail($issueId: String!) {
+      query IssueDetail($issueId: String!, $includeComments: Boolean!, $includeActivity: Boolean!) {
         issue(id: $issueId) {
           id
           identifier
@@ -131,7 +326,14 @@ export async function GET(
           description
           priority
           priorityLabel
+          estimate
           url
+          team {
+            id
+          }
+          project {
+            id
+          }
           state {
             id
             name
@@ -141,6 +343,7 @@ export async function GET(
           assignee {
             id
             name
+            avatarUrl
           }
           labels {
             nodes {
@@ -151,7 +354,7 @@ export async function GET(
           }
           createdAt
           updatedAt
-          comments {
+          comments @include(if: $includeComments) {
             nodes {
               id
               body
@@ -164,7 +367,7 @@ export async function GET(
               }
             }
           }
-          history {
+          history @include(if: $includeActivity) {
             nodes {
               id
               createdAt
@@ -186,6 +389,7 @@ export async function GET(
               toPriority
               actor {
                 name
+                avatarUrl
               }
             }
           }
@@ -193,15 +397,15 @@ export async function GET(
       }
     `;
 
-    const response = await fetch('https://api.linear.app/graphql', {
+    const response = await fetch(LINEAR_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `${decryptedToken.replace(/[^\x00-\xFF]/g, '')}`,
+        Authorization: decryptedToken.trim(),
       },
       body: JSON.stringify({
         query,
-        variables: { issueId }
+        variables: { issueId, includeComments, includeActivity },
       }),
     });
 
@@ -220,7 +424,14 @@ export async function GET(
           description?: string;
           priority: number;
           priorityLabel: string;
+          estimate?: number;
           url: string;
+          team?: {
+            id: string;
+          } | null;
+          project?: {
+            id: string;
+          } | null;
           state: {
             id: string;
             name: string;
@@ -230,6 +441,7 @@ export async function GET(
           assignee?: {
             id: string;
             name: string;
+            avatarUrl?: string;
           };
           labels: {
             nodes: Array<{
@@ -240,7 +452,7 @@ export async function GET(
           };
           createdAt: string;
           updatedAt: string;
-          comments: {
+          comments?: {
             nodes: Array<{
               id: string;
               body: string;
@@ -253,7 +465,7 @@ export async function GET(
               };
             }>;
           };
-          history: {
+          history?: {
             nodes: Array<{
               id: string;
               createdAt: string;
@@ -275,7 +487,8 @@ export async function GET(
               toPriority?: number;
               actor: {
                 name: string;
-              };
+                avatarUrl?: string;
+              } | null;
             }>;
           };
         };
@@ -297,33 +510,89 @@ export async function GET(
     }
 
     const issue = result.data.issue;
+    const issueBelongsToView = viewData.project_id
+      ? issue.project?.id === viewData.project_id
+      : viewData.team_id
+        ? issue.team?.id === viewData.team_id
+        : false;
 
-    // Transform the data to match our IssueDetail type
+    if (!issueBelongsToView || viewData.excluded_issue_ids?.includes(issue.id)) {
+      return NextResponse.json(
+        { error: 'Issue not found' },
+        { status: 404 }
+      );
+    }
+
+    // Enforce the view's allowed_statuses filter. Matches the list route's
+    // behaviour: an issue outside the allowed set is not visible through
+    // this view at all.
+    if (
+      viewData.allowed_statuses &&
+      viewData.allowed_statuses.length > 0 &&
+      !viewData.allowed_statuses.includes(issue.state.name)
+    ) {
+      return NextResponse.json(
+        { error: 'Issue not found' },
+        { status: 404 }
+      );
+    }
+    if (!issueMatchesAllowedLabels(viewData, issue.labels.nodes)) {
+      return NextResponse.json(
+        { error: 'Issue not found' },
+        { status: 404 }
+      );
+    }
+
+    const descriptionsVisible = viewData.show_descriptions !== false;
+    const prioritiesVisible = viewData.show_priorities !== false;
+    const assigneesVisible = viewData.show_assignees !== false;
+    const labelsVisible = viewData.show_labels !== false;
+    const comments = issue.comments?.nodes ?? [];
+
+    const referenceSourceMarkdown = [
+      descriptionsVisible ? issue.description : undefined,
+      ...comments.map((comment) => comment.body),
+    ]
+      .filter((markdown): markdown is string => Boolean(markdown))
+      .join('\n\n');
+
+    const referencedIssues = referenceSourceMarkdown
+      ? await fetchReferencedIssues(
+          decryptedToken,
+          extractReferencedIssueIdentifiers(referenceSourceMarkdown, issue.identifier),
+          viewData,
+        )
+      : {};
+
     const issueDetail: IssueDetail = {
       id: issue.id,
       identifier: issue.identifier,
       title: issue.title,
-      description: issue.description,
-      priority: issue.priority,
-      priorityLabel: issue.priorityLabel,
+      description: descriptionsVisible ? issue.description : undefined,
+      priority: prioritiesVisible ? issue.priority : 0,
+      priorityLabel: prioritiesVisible ? issue.priorityLabel : 'No priority',
+      estimate: prioritiesVisible ? issue.estimate : undefined,
       url: issue.url,
       state: issue.state,
-      assignee: issue.assignee,
-      labels: issue.labels.nodes,
+      assignee: assigneesVisible ? issue.assignee : undefined,
+      labels: labelsVisible ? issue.labels.nodes : [],
       createdAt: issue.createdAt,
       updatedAt: issue.updatedAt,
-      comments: issue.comments.nodes,
-      history: issue.history.nodes.map(h => ({
+      comments,
+      history: (issue.history?.nodes ?? []).map((h) => ({
         id: h.id,
         createdAt: h.createdAt,
         fromState: h.fromState,
         toState: h.toState,
-        fromAssignee: h.fromAssignee,
-        toAssignee: h.toAssignee,
-        fromPriority: h.fromPriority,
-        toPriority: h.toPriority,
-        user: h.actor,
+        fromAssignee: assigneesVisible ? h.fromAssignee : undefined,
+        toAssignee: assigneesVisible ? h.toAssignee : undefined,
+        fromPriority: prioritiesVisible ? h.fromPriority : undefined,
+        toPriority: prioritiesVisible ? h.toPriority : undefined,
+        user: h.actor
+          ? { name: h.actor.name, avatarUrl: h.actor.avatarUrl }
+          : undefined,
       })),
+      referencedIssues,
     };
 
     return NextResponse.json({

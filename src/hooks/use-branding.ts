@@ -1,13 +1,24 @@
 import { useState, useEffect } from 'react';
 import { BrandingSettings } from '@/lib/supabase';
 
-export function useBrandingSettings(userId: string | null) {
+type BrandingContext =
+  | { type: 'view'; slug: string }
+  | { type: 'roadmap'; slug: string }
+  | { type: 'form'; slug: string }
+
+export function useBrandingSettings(
+  userId: string | null,
+  context: BrandingContext | null = null,
+) {
   const [branding, setBranding] = useState<BrandingSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const contextType = context?.type;
+  const contextSlug = context?.slug;
 
   useEffect(() => {
-    if (!userId) {
+    if (!userId || !contextType || !contextSlug) {
+      setBranding(null);
       setLoading(false);
       return;
     }
@@ -17,7 +28,11 @@ export function useBrandingSettings(userId: string | null) {
       setError(null);
 
       try {
-        const response = await fetch(`/api/branding/${userId}`);
+        const params = new URLSearchParams({
+          type: contextType,
+          slug: contextSlug,
+        });
+        const response = await fetch(`/api/branding/${userId}?${params.toString()}`);
 
         if (response.ok) {
           const data = (await response.json()) as { branding: BrandingSettings | null };
@@ -34,14 +49,71 @@ export function useBrandingSettings(userId: string | null) {
     };
 
     loadBranding();
-  }, [userId]);
+  }, [userId, contextType, contextSlug]);
 
   return { branding, loading, error };
 }
 
-// Helper function to apply branding colours to CSS variables
-export function applyBrandingToPage(branding: BrandingSettings | null) {
+const SYSTEM_FONTS = new Set([
+  'arial', 'helvetica', 'times new roman', 'times', 'courier new', 'courier',
+  'georgia', 'verdana', 'tahoma', 'trebuchet ms', 'system-ui', 'sans-serif',
+  'serif', 'monospace',
+]);
+
+const GOOGLE_FONT_WEIGHTS = 'wght@300;400;500;600;700';
+
+function injectGoogleFontsLink(fontsToLoad: string[]) {
+  const googleFonts = Array.from(
+    new Set(
+      fontsToLoad
+        .map(f => f.replace(/['"]/g, '').trim())
+        .filter(f => f && !SYSTEM_FONTS.has(f.toLowerCase())),
+    ),
+  );
+
+  const linkId = 'branding-google-fonts';
+  const existing = document.getElementById(linkId) as HTMLLinkElement | null;
+
+  if (googleFonts.length === 0) {
+    existing?.remove();
+    return;
+  }
+
+  const familyParams = googleFonts
+    .map(f => `family=${encodeURIComponent(f).replace(/%20/g, '+')}:${GOOGLE_FONT_WEIGHTS}`)
+    .join('&');
+  const href = `https://fonts.googleapis.com/css2?${familyParams}&display=swap`;
+
+  if (existing) {
+    if (existing.href !== href) existing.href = href;
+    return;
+  }
+
+  const link = document.createElement('link');
+  link.id = linkId;
+  link.rel = 'stylesheet';
+  link.href = href;
+  document.head.appendChild(link);
+}
+
+// Helper function to apply branding colours to CSS variables.
+// `pageTitle` becomes the document title prefix (e.g. "My Roadmap - Acme").
+export function applyBrandingToPage(
+  branding: BrandingSettings | null,
+  pageTitle?: string,
+) {
   if (!branding) return;
+
+  // Update document.title from brand name + current page title. Either or
+  // both can be absent; composes with " - " when both are present.
+  if (typeof document !== 'undefined') {
+    const parts = [pageTitle, branding.brand_name].filter(
+      (s): s is string => Boolean(s && s.trim()),
+    );
+    if (parts.length > 0) {
+      document.title = parts.join(' - ');
+    }
+  }
 
   const root = document.documentElement;
 
@@ -79,14 +151,16 @@ export function applyBrandingToPage(branding: BrandingSettings | null) {
     root.style.setProperty('--input', branding.border_color);
   }
 
-  // Apply fonts - set both the CSS variable and the actual font-family on body
+  // Load Google Fonts and apply font families
+  const fontsToLoad: string[] = [];
   if (branding.font_family) {
+    fontsToLoad.push(branding.font_family.split(',')[0].trim());
     root.style.setProperty('--font-sans', branding.font_family);
     document.body.style.fontFamily = branding.font_family;
   }
 
   if (branding.heading_font_family) {
-    // Apply heading font to all heading elements
+    fontsToLoad.push(branding.heading_font_family.split(',')[0].trim());
     const headingStyle = document.getElementById('branding-heading-font');
     if (headingStyle) {
       headingStyle.textContent = `h1, h2, h3, h4, h5, h6 { font-family: ${branding.heading_font_family} !important; }`;
@@ -97,6 +171,8 @@ export function applyBrandingToPage(branding: BrandingSettings | null) {
       document.head.appendChild(style);
     }
   }
+
+  injectGoogleFontsLink(fontsToLoad);
 
   // Apply custom CSS
   if (branding.custom_css) {

@@ -1,35 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
-import type { Roadmap } from '@/lib/supabase';
-import crypto from 'crypto';
+import { authoriseRoadmap } from '@/lib/roadmap-auth';
+import { resolveRoadmapIssue } from '@/lib/roadmap-issue-access';
+import { isRoadmapStateOpenForVoting } from '@/lib/roadmap-issue-policy';
+import { checkRateLimit, getClientIp, hashIp, rateLimitResponse } from '@/lib/request-security';
+import * as z from 'zod';
 
-function hashIP(ip: string): string {
-  const salt = process.env.IP_HASH_SALT || 'default-salt';
-  return crypto
-    .createHash('sha256')
-    .update(ip + salt)
-    .digest('hex');
-}
-
-function getClientIP(request: NextRequest): string {
-  // Try various headers for the real IP
-  const forwardedFor = request.headers.get('x-forwarded-for');
-  if (forwardedFor) {
-    return forwardedFor.split(',')[0].trim();
-  }
-
-  const realIP = request.headers.get('x-real-ip');
-  if (realIP) {
-    return realIP;
-  }
-
-  const cfConnectingIP = request.headers.get('cf-connecting-ip');
-  if (cfConnectingIP) {
-    return cfConnectingIP;
-  }
-
-  return 'unknown';
-}
+const voteSchema = z.object({
+  issueId: z.string().trim().min(1).max(120),
+  fingerprint: z.string().trim().min(16).max(200),
+});
 
 export async function POST(
   request: NextRequest,
@@ -37,10 +17,6 @@ export async function POST(
 ) {
   try {
     const { slug } = await params;
-    const { issueId, fingerprint } = await request.json() as {
-      issueId?: string;
-      fingerprint?: string;
-    };
 
     if (!slug) {
       return NextResponse.json(
@@ -49,29 +25,28 @@ export async function POST(
       );
     }
 
-    if (!issueId || !fingerprint) {
+    const clientIp = getClientIp(request);
+    const rateLimit = await checkRateLimit(`roadmap-vote:${slug}:${clientIp}`, {
+      limit: 60,
+      windowMs: 60 * 60 * 1000,
+    });
+    if (!rateLimit.ok) return rateLimitResponse(rateLimit.retryAfterSeconds);
+
+    const parsed = voteSchema.safeParse(await request.json());
+    if (!parsed.success) {
       return NextResponse.json(
         { error: 'issueId and fingerprint are required' },
         { status: 400 }
       );
     }
+    const { issueId, fingerprint } = parsed.data;
 
-    // Check if roadmap exists, is active, and allows voting
-    const { data: roadmapData, error: roadmapError } = await supabaseAdmin
-      .from('roadmaps')
-      .select('id, allow_voting, is_active')
-      .eq('slug', slug)
-      .eq('is_active', true)
-      .single();
-
-    if (roadmapError || !roadmapData) {
-      return NextResponse.json(
-        { error: 'Roadmap not found or inactive' },
-        { status: 404 }
-      );
-    }
-
-    const roadmap = roadmapData as Pick<Roadmap, 'id' | 'allow_voting' | 'is_active'>;
+    // Auth first: is_active + expiry + password cookie. Visitors authenticate
+    // via the main roadmap password POST which sets the rm_access cookie, so
+    // password-protected roadmaps stay gated here too.
+    const auth = await authoriseRoadmap(slug, request);
+    if (!auth.ok) return auth.response;
+    const roadmap = auth.roadmap;
 
     if (!roadmap.allow_voting) {
       return NextResponse.json(
@@ -80,16 +55,30 @@ export async function POST(
       );
     }
 
-    // Hash the client IP for additional verification
-    const clientIP = getClientIP(request);
-    const ipHash = hashIP(clientIP);
+    const issueAccess = await resolveRoadmapIssue(roadmap, issueId);
+    if (!issueAccess.ok) return issueAccess.response;
+    if (!isRoadmapStateOpenForVoting(issueAccess.stateType)) {
+      return NextResponse.json(
+        { error: 'Voting is closed for this item' },
+        { status: 403 }
+      );
+    }
 
-    // Try to insert the vote (will fail if duplicate due to UNIQUE constraint)
+    // IP hashes are optional abuse-analysis metadata. Fingerprint-based
+    // deduplication remains the authoritative voting control.
+    const ipHash = hashIp(clientIp);
+
+    // Try to insert the vote (will fail if duplicate due to UNIQUE constraint).
+    // organisation_id is NOT NULL on roadmap_votes after migration 019 and
+    // linear_issue_id is the new home for the Linear issue identifier (sync
+    // trigger keeps issue_id aligned).
     const { error: insertError } = await supabaseAdmin
       .from('roadmap_votes')
       .insert({
         roadmap_id: roadmap.id,
-        issue_id: issueId,
+        organisation_id: roadmap.organisation_id,
+        issue_id: issueAccess.issueId,
+        linear_issue_id: issueAccess.issueId,
         visitor_fingerprint: fingerprint,
         ip_hash: ipHash,
       });
@@ -97,8 +86,9 @@ export async function POST(
     if (insertError) {
       // Check if it's a duplicate error (unique constraint violation)
       if (insertError.code === '23505') {
+        const voteCount = await getVoteCount(roadmap.id, issueAccess.issueId);
         return NextResponse.json(
-          { error: 'You have already voted for this item' },
+          { error: 'You have already voted for this item', voteCount },
           { status: 409 }
         );
       }
@@ -106,15 +96,11 @@ export async function POST(
     }
 
     // Get the updated vote count for this issue
-    const { count } = await supabaseAdmin
-      .from('roadmap_votes')
-      .select('*', { count: 'exact', head: true })
-      .eq('roadmap_id', roadmap.id)
-      .eq('issue_id', issueId);
+    const voteCount = await getVoteCount(roadmap.id, issueAccess.issueId);
 
     return NextResponse.json({
       success: true,
-      voteCount: count || 1,
+      voteCount,
     });
 
   } catch (error) {
@@ -122,7 +108,7 @@ export async function POST(
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error occurred'
+        error: 'Voting is temporarily unavailable. Please try again shortly.'
       },
       { status: 500 }
     );
@@ -135,10 +121,6 @@ export async function DELETE(
 ) {
   try {
     const { slug } = await params;
-    const { issueId, fingerprint } = await request.json() as {
-      issueId?: string;
-      fingerprint?: string;
-    };
 
     if (!slug) {
       return NextResponse.json(
@@ -147,36 +129,42 @@ export async function DELETE(
       );
     }
 
-    if (!issueId || !fingerprint) {
+    const clientIp = getClientIp(request);
+    const rateLimit = await checkRateLimit(`roadmap-vote-delete:${slug}:${clientIp}`, {
+      limit: 60,
+      windowMs: 60 * 60 * 1000,
+    });
+    if (!rateLimit.ok) return rateLimitResponse(rateLimit.retryAfterSeconds);
+
+    const parsed = voteSchema.safeParse(await request.json());
+    if (!parsed.success) {
       return NextResponse.json(
         { error: 'issueId and fingerprint are required' },
         { status: 400 }
       );
     }
+    const { issueId, fingerprint } = parsed.data;
 
-    // Check if roadmap exists and is active
-    const { data: roadmapData, error: roadmapError } = await supabaseAdmin
-      .from('roadmaps')
-      .select('id, is_active')
-      .eq('slug', slug)
-      .eq('is_active', true)
-      .single();
+    // Auth first: is_active + expiry + password cookie.
+    const auth = await authoriseRoadmap(slug, request);
+    if (!auth.ok) return auth.response;
+    const roadmap = auth.roadmap;
 
-    if (roadmapError || !roadmapData) {
+    const issueAccess = await resolveRoadmapIssue(roadmap, issueId);
+    if (!issueAccess.ok) return issueAccess.response;
+    if (!isRoadmapStateOpenForVoting(issueAccess.stateType)) {
       return NextResponse.json(
-        { error: 'Roadmap not found or inactive' },
-        { status: 404 }
+        { error: 'Voting is closed for this item' },
+        { status: 403 }
       );
     }
-
-    const roadmap = roadmapData as Pick<Roadmap, 'id' | 'is_active'>;
 
     // Delete the vote
     const { error: deleteError } = await supabaseAdmin
       .from('roadmap_votes')
       .delete()
       .eq('roadmap_id', roadmap.id)
-      .eq('issue_id', issueId)
+      .eq('issue_id', issueAccess.issueId)
       .eq('visitor_fingerprint', fingerprint);
 
     if (deleteError) {
@@ -184,15 +172,11 @@ export async function DELETE(
     }
 
     // Get the updated vote count for this issue
-    const { count } = await supabaseAdmin
-      .from('roadmap_votes')
-      .select('*', { count: 'exact', head: true })
-      .eq('roadmap_id', roadmap.id)
-      .eq('issue_id', issueId);
+    const voteCount = await getVoteCount(roadmap.id, issueAccess.issueId);
 
     return NextResponse.json({
       success: true,
-      voteCount: count || 0,
+      voteCount,
     });
 
   } catch (error) {
@@ -200,9 +184,27 @@ export async function DELETE(
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error occurred'
+        error: 'Voting is temporarily unavailable. Please try again shortly.'
       },
       { status: 500 }
     );
   }
+}
+
+async function getVoteCount(roadmapId: string, issueId: string): Promise<number | undefined> {
+  const { count, error } = await supabaseAdmin
+    .from('roadmap_votes')
+    .select('*', { count: 'exact', head: true })
+    .eq('roadmap_id', roadmapId)
+    .eq('issue_id', issueId);
+
+  // A successful mutation must not be reported as failed merely because its
+  // follow-up count read is temporarily unavailable. The client keeps its
+  // optimistic count and reconciles on the next refresh in that case.
+  if (error) {
+    console.error('Failed to read updated roadmap vote count:', error);
+    return undefined;
+  }
+
+  return count ?? 0;
 }
